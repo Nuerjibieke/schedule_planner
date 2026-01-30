@@ -1,0 +1,16 @@
+# 使用前请填入下方 3 个密钥，然后执行: docker compose up -d
+# 浏览器访问 http://localhost:8501
+
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    # 或直接在此写环境变量（不提交到仓库）：
+    # environment:
+    #   - OPENAI_API_KEY=sk-xxx
+    #   - SUPABASE_URL=https://xxx.supabase.co
+    #   - SUPABASE_KEY=eyJxxx
+    #   - WORKDAY_END_HOUR=22
