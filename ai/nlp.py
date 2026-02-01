@@ -131,7 +131,38 @@ _SCHEMA = """
 - **【重新规划待办】优先规则**：当用户说"重新规划待完成的任务"、"按当前时间重新安排"、"获取当前系统时间重新规划安排待完成的任务"、"重新安排今天的待办"、"重新排一下今天的待办"、"根据当前时间重新规划"等时，这是要求**根据当前时间重新规划当日尚未完成的任务**。必须识别为 **plan** 意图（不是 query）。**必须为【当日日程上下文】中每一条 status 为 "pending" 的任务各生成一个 action="plan"，不能遗漏任何一条待办。** 每条 action：title 为该项任务的 title，start_iso 与 end_iso 从**当前时间**开始顺延（第一条从当前时间开始，下一条从上一条的 end_iso 开始）；duration_minutes 可根据该任务原有的 start_time/end_time 推算分钟数，或给 30/60 等合理默认值；priority、difficulty、tips、reason 可参考原任务或合理推断。必须填写 planning_reason，说明为何按当前时间重新排布以及任务顺序理由（至少50字）。若当日没有 pending 任务，仍返回 intent=plan、actions=[]、planning_reason 说明“当日暂无待办”，reply_text 说明已检查无待办即可。
 
 当前时间：{now_iso}，今天日期：{today}，星期：{weekday}。
+
+【相对日期参考】用户说「明天」「后天」「下周一」至「下周日」时，必须使用以下对应日期填写 start_iso/end_iso（格式 YYYY-MM-DDTHH:MM:00）：
+{relative_dates}
+- **重要**：例如用户说「下周三17点到17:30开会」时，start_iso 必须为「下周三」对应的日期 + T17:00:00，end_iso 为同一天 T17:30:00，不得按「下周」误解为 7 天后。
 """
+
+
+def _relative_dates_ref(today: date) -> str:
+    """生成「明天」「下周一」等相对日期参考，供 prompt 注入，避免模型把下周三算成错误日期。"""
+    tomorrow = today + timedelta(days=1)
+    day_after = today + timedelta(days=2)
+
+    def next_weekday(d: date, target_w: int) -> date:
+        # target_w: Mon=0 .. Sun=6
+        days = (target_w - d.weekday() + 7) % 7
+        if days == 0:
+            days = 7
+        return d + timedelta(days=days)
+
+    next_mon = next_weekday(today, 0)
+    next_tue = next_weekday(today, 1)
+    next_wed = next_weekday(today, 2)
+    next_thu = next_weekday(today, 3)
+    next_fri = next_weekday(today, 4)
+    next_sat = next_weekday(today, 5)
+    next_sun = next_weekday(today, 6)
+
+    return (
+        f"明天={tomorrow.isoformat()}，后天={day_after.isoformat()}，"
+        f"下周一={next_mon.isoformat()}，下周二={next_tue.isoformat()}，下周三={next_wed.isoformat()}，"
+        f"下周四={next_thu.isoformat()}，下周五={next_fri.isoformat()}，下周六={next_sat.isoformat()}，下周日={next_sun.isoformat()}。"
+    )
 
 
 def _time_desc_to_iso(today: date, desc: str) -> Optional[str]:
@@ -414,7 +445,7 @@ def parse_user_command(
 
     # 优先 HKUST Azure OpenAI
     if AZURE_OPENAI_API_KEY and AzureOpenAI is not None:
-        prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday)
+        prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
         azure_res = _try_hkust_azure(_with_context(prompt))
         if azure_res is not None:
             log.info("使用 HKUST Azure OpenAI 进行解析")
@@ -423,7 +454,7 @@ def parse_user_command(
     # 其次 Gemini（适配你当前 AIza... key）
     if GEMINI_API_KEY and httpx is not None:
         try:
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday)
+            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
             sys_prompt = _with_context(prompt)
             full = f"{sys_prompt}\n用户输入：{user_text}"
             # Google AI Studio / Gemini Developer API：优先 v1beta
@@ -523,7 +554,7 @@ def parse_user_command(
             # Gemini 失败时：优先回退 HKUST Azure 进行解析
             _log_http_error("gemini nlp", e)
             log.exception("gemini nlp parse failed: %s", e)
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday)
+            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
             azure_res = _try_hkust_azure(_with_context(prompt))
             if azure_res is not None:
                 log.info("Gemini 失败，成功回退到 Azure OpenAI")
@@ -534,7 +565,7 @@ def parse_user_command(
     if OPENAI_API_KEY and OpenAI is not None:
         try:
             client = OpenAI(api_key=OPENAI_API_KEY)
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday)
+            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
             sys_prompt = _with_context(prompt)
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",

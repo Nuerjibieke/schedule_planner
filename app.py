@@ -3131,3 +3131,140 @@ with st.container(border=True):
                         st.markdown(f"- `{tm}` **{lg.kind}**：{lg.content}")
                 else:
                     st.caption("暂无更新日志。")
+
+# ---------- 未来日程日历（苹果风格，全宽，放在最后） ----------
+def _escape_html(s: str) -> str:
+    if not s:
+        return ""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
+st.markdown("""
+<div style="margin-bottom: 0.75rem;">
+  <span style="font-weight: 700; color: #1e293b; font-size: 1.05rem;">📅 未来日程</span>
+  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">未来一周或一月的日程概览</span>
+</div>
+""", unsafe_allow_html=True)
+
+with st.container(border=True):
+    today = date.today()
+    view_mode = st.radio(
+        "显示范围",
+        ["未来一周", "未来一月"],
+        horizontal=True,
+        key="future_schedule_view",
+        label_visibility="collapsed",
+    )
+    if view_mode == "未来一周":
+        end_d = today + timedelta(days=6)
+    else:
+        end_d = today + timedelta(days=30)
+
+    try:
+        future_tasks = repo.tasks_for_date_range(today, end_d)
+    except Exception:
+        future_tasks = []
+
+    tasks_by_day: dict[str, list] = {}
+    for t in future_tasks:
+        try:
+            day_key = (t.start_time or "")[:10]
+            if day_key:
+                tasks_by_day.setdefault(day_key, []).append(t)
+        except Exception:
+            continue
+    for day_key in tasks_by_day:
+        tasks_by_day[day_key].sort(key=lambda x: x.start_time or "")
+
+    weekdays_cn = ["一", "二", "三", "四", "五", "六", "日"]
+
+    # 苹果风格 CSS
+    st.markdown("""
+<style>
+.cal-apple { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+.cal-week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }
+.cal-day { min-height: 120px; border-right: 1px solid #e2e8f0; padding: 8px; background: #fafafa; }
+.cal-day:last-child { border-right: none; }
+.cal-day--today { background: #eff6ff; }
+.cal-day-num { font-size: 0.85rem; color: #64748b; margin-bottom: 6px; }
+.cal-day-num--today { color: #2563eb; font-weight: 700; }
+.cal-day-num--today .n { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: #2563eb; color: #fff; }
+.cal-event { font-size: 0.75rem; padding: 4px 6px; margin-bottom: 4px; border-radius: 4px; border-left: 3px solid #3b82f6; background: #fff; color: #334155; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-event--high { border-left-color: #ff6b6b; }
+.cal-event--low { border-left-color: #94a3b8; }
+.cal-event-time { color: #64748b; font-size: 0.7rem; margin-right: 4px; }
+.cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }
+.cal-month-head { background: #f1f5f9; font-size: 0.75rem; color: #64748b; font-weight: 600; padding: 8px 4px; text-align: center; border-bottom: 1px solid #e2e8f0; }
+.cal-month-cell { min-height: 72px; padding: 6px; border-right: 1px solid #e2e8f0; border-bottom: 1px solid #e2e8f0; background: #fff; }
+.cal-month-cell:nth-child(7n) { border-right: none; }
+.cal-month-cell--other { background: #f8fafc; color: #cbd5e1; }
+.cal-month-cell--today { background: #eff6ff; }
+.cal-month-num { font-size: 0.9rem; margin-bottom: 4px; }
+.cal-month-num--today .n { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; background: #2563eb; color: #fff; font-weight: 700; }
+.cal-month-events { font-size: 0.7rem; color: #475569; }
+.cal-month-event { padding: 2px 4px; margin-bottom: 2px; border-radius: 2px; border-left: 2px solid #3b82f6; background: #f0f9ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-month-event--high { border-left-color: #ff6b6b; background: #fff5f5; }
+.cal-month-event--low { border-left-color: #94a3b8; background: #f1f5f9; }
+</style>
+""", unsafe_allow_html=True)
+
+    if view_mode == "未来一周":
+        # 一周视图：7 列，苹果风格日格 + 事件块
+        head = "".join([f'<div class="cal-month-head">{w}</div>' for w in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]])
+        body_parts = []
+        for i in range(7):
+            d = today + timedelta(days=i)
+            day_key = d.isoformat()
+            day_tasks = tasks_by_day.get(day_key, [])
+            is_today = d == today
+            today_cls = " cal-day--today" if is_today else ""
+            num_cls = " cal-day-num--today" if is_today else ""
+            num_inner = f'<span class="n">{d.day}</span>' if is_today else str(d.day)
+            num_html = f'<div class="cal-day-num{num_cls}">{d.month}月 {num_inner}</div>'
+            events_html = ""
+            for t in day_tasks:
+                start_str = (t.start_time or "")[11:16] if len(t.start_time or "") >= 16 else ""
+                end_str = (t.end_time or "")[11:16] if len(t.end_time or "") >= 16 else ""
+                pr = (t.priority or "normal").lower()
+                pr_cls = " cal-event--high" if pr == "high" else (" cal-event--low" if pr == "low" else "")
+                title_esc = _escape_html(t.title or "（无标题）")
+                events_html += f'<div class="cal-event{pr_cls}"><span class="cal-event-time">{start_str}–{end_str}</span>{title_esc}</div>'
+            empty_label = '<span style="color:#94a3b8;font-size:0.75rem;">无安排</span>'
+            body_parts.append(f'<div class="cal-day{today_cls}">{num_html}<div class="cal-day-events">{events_html or empty_label}</div></div>')
+        grid_html = f'<div class="cal-apple cal-week"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(body_parts) + "</div>"
+        st.markdown(grid_html, unsafe_allow_html=True)
+    else:
+        # 一月视图：月历网格，每格日期 + 事件条
+        start_align = today - timedelta(days=today.weekday())
+        end_align = end_d + timedelta(days=(6 - end_d.weekday()))
+        cur = start_align
+        weeks: list[list[date]] = []
+        while cur <= end_align:
+            week = [cur + timedelta(days=j) for j in range(7)]
+            weeks.append(week)
+            cur = week[-1] + timedelta(days=1)
+        head = "".join([f'<div class="cal-month-head">周{w}</div>' for w in weekdays_cn])
+        cells_html = []
+        for week_row in weeks:
+            for d in week_row:
+                day_key = d.isoformat()
+                day_tasks = tasks_by_day.get(day_key, [])
+                is_today = d == today
+                in_range = today <= d <= end_d
+                other_cls = " cal-month-cell--other" if not in_range else ""
+                today_cell_cls = " cal-month-cell--today" if is_today else ""
+                num_cls = " cal-month-num--today" if is_today else ""
+                num_inner = f'<span class="n">{d.day}</span>' if is_today else str(d.day)
+                num_html = f'<div class="cal-month-num{num_cls}">{num_inner}</div>'
+                events_html = ""
+                for t in day_tasks[:5]:
+                    pr = (t.priority or "normal").lower()
+                    pr_cls = " cal-month-event--high" if pr == "high" else (" cal-month-event--low" if pr == "low" else "")
+                    title_esc = _escape_html((t.title or "（无）")[:14])
+                    events_html += f'<div class="cal-month-event{pr_cls}">{title_esc}</div>'
+                if len(day_tasks) > 5:
+                    events_html += f'<div style="font-size:0.65rem;color:#94a3b8;">+{len(day_tasks)-5}项</div>'
+                cells_html.append(f'<div class="cal-month-cell{other_cls}{today_cell_cls}">{num_html}<div class="cal-month-events">{events_html}</div></div>')
+        grid_html = f'<div class="cal-apple cal-month"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(cells_html) + "</div>"
+        st.markdown(grid_html, unsafe_allow_html=True)
+    st.caption("今日以蓝底圆点标出；事件条左侧颜色表示优先级（红=高，蓝=普通，灰=低）。")

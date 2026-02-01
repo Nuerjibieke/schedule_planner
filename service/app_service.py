@@ -692,8 +692,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                         repo.update_task(target_task.id, payload)
                         log.info("重新规划：更新已有待办任务 id=%s title=%s -> %s–%s", target_task.id, title, start_iso[:16], end_iso[:16])
                         updated += 1
+                        date_str = start_iso[:10] if len(start_iso) >= 10 else ""
                         lines.append(
-                            f"- 重排：{start_iso[11:16]}–{end_iso[11:16]} {title}（原 {target_task.start_time[11:16]}–{target_task.end_time[11:16]}）"
+                            f"- 重排：{date_str} {start_iso[11:16]}–{end_iso[11:16]} {title}（原 {target_task.start_time[11:16]}–{target_task.end_time[11:16]}）"
                         )
                         day_tasks = repo.tasks_for_date(today)
                         continue
@@ -722,8 +723,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     log.exception("任务插入失败: title=%s, error=%s", title, e)
                     raise
                 diff_str = f", {difficulty}" if difficulty in ("easy", "medium", "hard") else ""
+                date_str = created.start_time[:10] if len(created.start_time) >= 10 else ""
                 lines.append(
-                    f"- 新增：{created.start_time[11:16]}–{created.end_time[11:16]} {created.title}（{created.priority}{diff_str}，{dur}min）"
+                    f"- 新增：{date_str} {created.start_time[11:16]}–{created.end_time[11:16]} {created.title}（{created.priority}{diff_str}，{dur}min）"
                 )
                 if isinstance(tips, list) and tips:
                     show = [str(x).strip() for x in tips if str(x).strip()]
@@ -765,9 +767,11 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     if progress >= 100:
                         repo.update_task(target.id, {"status": "done"})
                         completed += 1
-                        lines.append(f"- 完成：{target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（100%）")
+                        done_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
+                        lines.append(f"- 完成：{done_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（100%）")
                     else:
-                        lines.append(f"- 更新进度：{target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（{progress}%）")
+                        prog_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
+                        lines.append(f"- 更新进度：{prog_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（{progress}%）")
                 else:
                     # 没有进度百分比，直接标记为完成，并确保 memo 中写入 progress:100 以便进度条显示 100%
                     current_memo = (target.memo or "").strip()
@@ -779,7 +783,8 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     new_memo = f"{memo_clean} | progress:100" if memo_clean else "progress:100"
                     repo.update_task(target.id, {"status": "done", "memo": new_memo})
                     completed += 1
-                    lines.append(f"- 完成：{target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
+                    done_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
+                    lines.append(f"- 完成：{done_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
                 continue
 
             if act == "delete":
@@ -788,7 +793,8 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     continue
                 repo.delete_task(target.id)
                 deleted += 1
-                lines.append(f"- 删除：{target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
+                del_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
+                lines.append(f"- 删除：{del_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
                 continue
 
             if act == "update":
@@ -932,7 +938,8 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                 if a.get("memo"):
                     repo.update_task(target.id, {"memo": a.get("memo")})
                 updated += 1
-                lines.append(f"- 修改：{target.title} → {new_start[11:16]}–{new_end[11:16]}（顺延 {shifted} 条）")
+                upd_date = new_start[:10] if len(new_start) >= 10 else ""
+                lines.append(f"- 修改：{target.title} → {upd_date} {new_start[11:16]}–{new_end[11:16]}（顺延 {shifted} 条）")
                 if res.overflow_warning:
                     overflow = res.overflow_warning
                 continue
@@ -1057,7 +1064,8 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
             memo=cmd.memo,
         )
         repo.insert_task(t)
-        time_str = f"（{start[11:16]}–{end[11:16]}）" if len(start) >= 16 else ""
+        date_str = start[:10] if len(start) >= 10 else ""
+        time_str = f"（{date_str} {start[11:16]}–{end[11:16]}）" if len(start) >= 16 else (f"（{date_str}）" if date_str else "")
         return cmd.reply_text or f"已为您新增任务：{title}{time_str}。", None, None, reasoning
 
     if cmd.intent == "delete":
