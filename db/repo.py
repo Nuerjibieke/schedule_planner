@@ -43,6 +43,23 @@ def tasks_for_date(d: date) -> List[Task]:
     return [Task.from_row(x) for x in (r.data or [])]
 
 
+def tasks_overdue_pending(before_date: date) -> List[Task]:
+    """取开始时间早于 before_date 且 status 为 pending、未锁定的任务，按 start_time 排序。用于延期到今日。"""
+    sb = get_supabase()
+    before_iso = before_date.isoformat() + "T00:00:00"
+    r = (
+        sb.table(TASKS_TABLE)
+        .select("*")
+        .lt("start_time", before_iso)
+        .eq("status", "pending")
+        .eq("is_fixed", False)
+        .order("start_time")
+        .execute()
+    )
+    _log_result(f"tasks_overdue_pending(before={before_date.isoformat()})", r)
+    return [Task.from_row(x) for x in (r.data or [])]
+
+
 def tasks_for_date_range(start_d: date, end_d: date) -> List[Task]:
     """
     取日期区间内的任务（按 start_time 过滤，包含起止日期），按 start_time 排序。

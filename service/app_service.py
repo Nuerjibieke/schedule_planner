@@ -40,6 +40,23 @@ def _parse_dt_naive(s: str) -> datetime:
             return datetime.now().replace(microsecond=0)
 
 
+def _parse_dt_local_date(s: str) -> Optional[date]:
+    """把 ISO 字符串解析为本地日期，用于「是否早于今天」等比较。"""
+    if not s:
+        return None
+    try:
+        ss = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ss)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().date()
+    except Exception:
+        try:
+            return datetime.fromisoformat(s[:19]).date()
+        except Exception:
+            return None
+
+
 def _to_iso(dt: datetime) -> str:
     """转换为 ISO 格式，统一为 UTC 时区后缀格式以便与数据库格式一致。"""
     dt = dt.replace(microsecond=0)
@@ -56,46 +73,42 @@ def get_today_tasks() -> List[Task]:
 
 def check_and_reschedule_overdue_tasks() -> Tuple[int, str]:
     """
-    检查昨天的未完成任务，自动延期到今天。
+    检查所有早于今天的未完成任务，自动延期到今天。
+    只延期 status 为 pending 且未锁定的任务；已完成(done)的不动。
     返回：(延期任务数, 消息)
     """
-    yesterday = date.today() - timedelta(days=1)
-    yesterday_tasks = repo.tasks_for_date(yesterday)
-    
-    now = datetime.now().replace(microsecond=0)
     today = date.today()
+    overdue_tasks = repo.tasks_overdue_pending(today)
     rescheduled_count = 0
     messages = []
-    
-    for task in yesterday_tasks:
-        # 只处理未完成且未锁定的任务
-        if task.status == "done" or task.is_fixed:
+
+    for task in overdue_tasks:
+        task_end_local_date = _parse_dt_local_date(task.end_time)
+        if task_end_local_date is None:
             continue
-        
+        # 仅当任务结束时间（本地日期）早于今天时才延期，避免把「今天凌晨已结束」的任务再挪到今天
+        if task_end_local_date >= today:
+            continue
+
+        task_start = _parse_dt_naive(task.start_time)
         task_end = _parse_dt_naive(task.end_time)
-        # 如果任务结束时间在昨天，说明是昨天的任务
-        if task_end.date() < today:
-            # 计算任务时长
-            task_start = _parse_dt_naive(task.start_time)
-            duration_min = int((task_end - task_start).total_seconds() / 60)
-            
-            # 找到今天最早的空闲时间段
-            today_tasks = repo.tasks_for_date(today)
-            new_start, new_end = _find_earliest_free_slot(today_tasks, today, duration_min)
-            
-            # 更新任务时间
-            new_start_iso = _to_iso(new_start)
-            new_end_iso = _to_iso(new_end)
-            repo.update_task(task.id, {
-                "start_time": new_start_iso,
-                "end_time": new_end_iso
-            })
-            
-            rescheduled_count += 1
-            messages.append(f"- {task.title}：延期到 {new_start_iso[11:16]}–{new_end_iso[11:16]}")
-    
+        duration_min = int((task_end - task_start).total_seconds() / 60)
+
+        today_tasks = repo.tasks_for_date(today)
+        new_start, new_end = _find_earliest_free_slot(today_tasks, today, duration_min)
+        new_start_iso = _to_iso(new_start)
+        new_end_iso = _to_iso(new_end)
+        repo.update_task(task.id, {
+            "start_time": new_start_iso,
+            "end_time": new_end_iso
+        })
+        rescheduled_count += 1
+        messages.append(f"- {task.title}：延期到 {new_start_iso[11:16]}–{new_end_iso[11:16]}")
+        # 更新本地今日任务列表，避免下一个任务占用同一时段
+        today_tasks = repo.tasks_for_date(today)
+
     if rescheduled_count > 0:
-        msg = f"已自动延期 {rescheduled_count} 个昨天的未完成任务到今天：\n" + "\n".join(messages)
+        msg = f"已自动延期 {rescheduled_count} 个逾期未完成任务到今天：\n" + "\n".join(messages)
     else:
         msg = "没有需要延期的任务。"
     
@@ -156,6 +169,11 @@ def update_task_progress(task_id: str, progress: int) -> Tuple[bool, str]:
     else:
         new_memo = f"progress:{progress}"
     
+    # 若 memo 中已有相同进度则不再写库，避免无谓 update 和后续 rerun 刷屏
+    progress_in_memo = re.findall(r'progress:\s*(\d+)', current_memo)
+    if progress_in_memo and int(progress_in_memo[-1]) == progress:
+        return True, f"任务进度已为{progress}%"
+    
     log.info("update_task_progress: task_id=%s progress=%s memo_before=%r new_memo=%r",
              task_id, progress, current_memo, new_memo)
     updated = repo.update_task(task_id, {"memo": new_memo})
@@ -166,9 +184,8 @@ def update_task_progress(task_id: str, progress: int) -> Tuple[bool, str]:
         repo.update_task(task_id, {"status": "done"})
         return True, f"任务进度已更新为{progress}%，已自动标记为完成"
     
-    # 如果进度小于100%但任务状态是完成，改为待办
-    if progress < 100 and task.status == "done":
-        repo.update_task(task_id, {"status": "pending"})
+    # 不再在 progress<100 时把「已完成」改回待办，避免覆盖用户刚点的「完成」
+    # （例如用户先点完成再调进度条，或 iframe/URL 带着 progress=0 触发更新）
     
     return True, f"任务进度已更新为{progress}%"
 
@@ -658,6 +675,28 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     start_iso = _to_iso(slot_s)
                     end_iso = _to_iso(slot_e)
                     log.info("找到空闲时间段: %s - %s", start_iso, end_iso)
+
+                # 重新规划时：若当日已有同标题的待办任务，则更新其时间/memo，避免重复创建
+                if act == "plan":
+                    existing_pending = [
+                        t for t in day_tasks
+                        if (t.title or "").strip() == title and (str(t.status or "").lower() == "pending")
+                    ]
+                    if existing_pending:
+                        target_task = existing_pending[0]
+                        payload = {"start_time": start_iso, "end_time": end_iso}
+                        if final_memo is not None:
+                            payload["memo"] = final_memo
+                        if pr in ("high", "normal", "low"):
+                            payload["priority"] = pr
+                        repo.update_task(target_task.id, payload)
+                        log.info("重新规划：更新已有待办任务 id=%s title=%s -> %s–%s", target_task.id, title, start_iso[:16], end_iso[:16])
+                        updated += 1
+                        lines.append(
+                            f"- 重排：{start_iso[11:16]}–{end_iso[11:16]} {title}（原 {target_task.start_time[11:16]}–{target_task.end_time[11:16]}）"
+                        )
+                        day_tasks = repo.tasks_for_date(today)
+                        continue
 
                 log.info("准备创建Task对象: title=%s, start_iso=%s, end_iso=%s, priority=%s", title, start_iso, end_iso, pr)
                 try:

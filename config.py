@@ -23,3 +23,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 WORKDAY_END_HOUR = int(os.getenv("WORKDAY_END_HOUR", "22"))
 # 时间轴显示范围（小时）
 WORKDAY_START_HOUR = int(os.getenv("WORKDAY_START_HOUR", "8"))
+# 日程提醒：提前多少分钟弹出系统通知（0=仅到点提醒）
+REMINDER_MINUTES_BEFORE = int(os.getenv("REMINDER_MINUTES_BEFORE", "5"))
+# 提醒守护进程轮询间隔（秒）
+REMINDER_POLL_INTERVAL = int(os.getenv("REMINDER_POLL_INTERVAL", "60"))

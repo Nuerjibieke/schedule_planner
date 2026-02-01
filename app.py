@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 import streamlit.components.v1 as components
 
 from db.client import init_supabase
-from config import SUPABASE_URL, SUPABASE_KEY, WORKDAY_START_HOUR, WORKDAY_END_HOUR
+from config import SUPABASE_URL, SUPABASE_KEY, WORKDAY_START_HOUR, WORKDAY_END_HOUR, REMINDER_POLL_INTERVAL
 from service.app_service import (
     handle_user_command, 
     apply_pending_plan,
@@ -29,6 +29,7 @@ from report import get_weekly_report_text, get_monthly_report_text, run_daily_ar
 from utils.logging_setup import setup_logging, get_recent_logs
 from db.models import Task
 from db import repo
+from utils.reminder_check import run_reminder_check
 
 setup_logging()
 
@@ -404,6 +405,15 @@ if "show_logs" not in st.session_state:
     st.session_state.show_logs = False
 if "current_executing_task_id" not in st.session_state:
     st.session_state.current_executing_task_id = None
+
+
+@st.fragment(run_every=timedelta(seconds=REMINDER_POLL_INTERVAL))
+def _schedule_reminder_fragment():
+    """后台定时检查：到点或临近开始时发送系统桌面提醒（与电脑通知联动）。"""
+    run_reminder_check()
+
+
+_schedule_reminder_fragment()
 
 # 全局样式美化：现代化设计风格
 st.markdown(
@@ -2461,35 +2471,47 @@ if tasks:
                     st_str = t.start_time[11:16] if len(t.start_time) >= 16 else t.start_time
                     et_str = t.end_time[11:16] if len(t.end_time) >= 16 else t.end_time
                     
-                    # 优先从 memo 读取用户设置的进度（取最后一次出现）
+                    # 进度与展示：status=done 时一律显示「已完成」和 100%
+                    # 待办任务：仅当用户点了「开始」后才按计时动态更新进度；暂停或未开始时只显示 memo 中保存的进度，不按日历时间自动更新
                     user_progress = None
                     if t.memo:
                         progress_matches = re.findall(r'progress:\s*(\d+)', str(t.memo))
                         if progress_matches:
                             user_progress = int(progress_matches[-1])
                     
-                    # 进度与展示：status=done 时一律显示「已完成」和 100%，不采用 memo 里的 progress（避免 memo 被误写成 0 时显示不一致）
                     if t.status == "done":
                         progress = 100
                         display_as_done = True
                     else:
                         display_as_done = False
-                        if user_progress is not None:
-                            progress = user_progress
-                        else:
+                        has_timer_start = bool(t.memo and "timer_start:" in str(t.memo))
+                        if has_timer_start:
+                            # 正在计时：按 timer_start + total_work_minutes 动态计算进度
                             try:
                                 start_dt = datetime.fromisoformat(t.start_time.replace("Z", "+00:00"))
                                 end_dt = datetime.fromisoformat(t.end_time.replace("Z", "+00:00"))
-                                if now < start_dt:
-                                    progress = 0
-                                elif now >= end_dt:
-                                    progress = 100
+                                if start_dt.tzinfo:
+                                    start_dt = start_dt.astimezone().replace(tzinfo=None)
+                                if end_dt.tzinfo:
+                                    end_dt = end_dt.astimezone().replace(tzinfo=None)
+                                task_duration_min = (end_dt - start_dt).total_seconds() / 60
+                                total_work_match = re.search(r'total_work_minutes:\s*(\d+)', str(t.memo))
+                                total_work_minutes = int(total_work_match.group(1)) if total_work_match else 0
+                                timer_start_match = re.search(r'timer_start:\s*([^|\s]+)', str(t.memo))
+                                if timer_start_match and task_duration_min > 0:
+                                    timer_start = datetime.fromisoformat(timer_start_match.group(1).strip().replace("Z", "+00:00"))
+                                    if timer_start.tzinfo:
+                                        timer_start = timer_start.astimezone().replace(tzinfo=None)
+                                    elapsed_since_start = (now - timer_start).total_seconds() / 60
+                                    total_work_minutes += int(elapsed_since_start)
+                                    progress = min(100, max(0, int((total_work_minutes / task_duration_min) * 100)))
                                 else:
-                                    total_duration = (end_dt - start_dt).total_seconds()
-                                    elapsed = (now - start_dt).total_seconds()
-                                    progress = min(100, max(0, int((elapsed / total_duration) * 100)))
+                                    progress = user_progress if user_progress is not None else 0
                             except Exception:
-                                progress = 0
+                                progress = user_progress if user_progress is not None else 0
+                        else:
+                            # 未开始或已暂停：只显示 memo 中保存的进度，不按当前时间推算
+                            progress = user_progress if user_progress is not None else 0
                     if display_as_done:
                         color = "🟢"
                         progress_class = "done"
@@ -2526,11 +2548,12 @@ if tasks:
                         min_value=0,
                         max_value=100,
                         value=progress,
-                        key=f"progress_slider_{t.id}",
+                        key=f"progress_slider_{t.id}_{t.status}",
                         disabled=progress_slider_disabled,
                         label_visibility="collapsed",
                     )
-                    if new_progress != progress:
+                    # 仅对待办任务根据滑块写回进度；已完成任务不根据滑块更新，避免 stale widget 状态(0)与 progress(100) 不等导致无限 rerun 刷屏
+                    if not display_as_done and new_progress != progress:
                         ok, msg = update_task_progress(str(t.id), new_progress)
                         st.session_state.last_feedback = msg
                         st.rerun()

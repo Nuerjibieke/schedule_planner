@@ -128,6 +128,7 @@ _SCHEMA = """
   - 只有当用户明确提到**现有任务**的名称或ID时，才应该识别为 **update** 意图。例如"把agent开发推迟半小时"是update，因为"agent开发"是现有任务。
   - 如果用户提到的新任务名称与现有任务名称完全不同，必须识别为 insert，不要误识别为 update。
 - **【记录已发生的事】优先规则**：当用户说"从X点到现在我在做Y"、"从X点到刚才我在做Y"、"X点到现在一直在做Y"、"刚才从X点到现在在Y"等（X为小时，Y为**具体做的事/任务名**），这是在**记录已经发生过的活动**，不是要完成或修改当日任务列表里的任何现有任务。必须识别为 **insert** 意图：action="insert"，title=Y（如"调试日程助手代码"），start_iso=今日T X:00:00+00:00（或今日T X:00:00），end_iso=**当前时间**（使用上文给出的「当前时间」的完整值，如 2026-01-29T09:03:24+00:00）。不要返回 complete/update 现有任务，不要用当日任务列表里的任务名去匹配Y。
+- **【重新规划待办】优先规则**：当用户说"重新规划待完成的任务"、"按当前时间重新安排"、"获取当前系统时间重新规划安排待完成的任务"、"重新安排今天的待办"、"重新排一下今天的待办"、"根据当前时间重新规划"等时，这是要求**根据当前时间重新规划当日尚未完成的任务**。必须识别为 **plan** 意图（不是 query）。**必须为【当日日程上下文】中每一条 status 为 "pending" 的任务各生成一个 action="plan"，不能遗漏任何一条待办。** 每条 action：title 为该项任务的 title，start_iso 与 end_iso 从**当前时间**开始顺延（第一条从当前时间开始，下一条从上一条的 end_iso 开始）；duration_minutes 可根据该任务原有的 start_time/end_time 推算分钟数，或给 30/60 等合理默认值；priority、difficulty、tips、reason 可参考原任务或合理推断。必须填写 planning_reason，说明为何按当前时间重新排布以及任务顺序理由（至少50字）。若当日没有 pending 任务，仍返回 intent=plan、actions=[]、planning_reason 说明“当日暂无待办”，reply_text 说明已检查无待办即可。
 
 当前时间：{now_iso}，今天日期：{today}，星期：{weekday}。
 """
@@ -403,6 +404,7 @@ def parse_user_command(
             f"{tasks_ctx_json}\n\n"
             f"【补充说明】\n"
             f"- **首先判断意图**：如果用户提到的新任务名称**不在**上述任务列表中，必须是 **insert** 意图，创建新任务。只有当用户明确提到**现有任务**的名称或ID时，才使用 update/delete/complete 意图。\n"
+            f"- **重新规划待办**：用户说「重新规划待完成的任务」「按当前时间重新安排」「获取当前系统时间重新规划安排待完成的任务」等时，必须返回 **plan** 意图，**为上述任务列表中每一条 status 为 pending 的任务各生成一个 action=plan（不能漏掉任何一条）**，并从当前时间顺延 start_iso/end_iso；不要返回 query。\n"
             f"- 从当日任务列表中查找 target_task_id，优先匹配任务标题或时间\n"
             f"- update 操作：必须提供 delta_minutes（时间偏移）或 new_start_iso/new_end_iso（新时间）或 duration_minutes（新时长）中的至少一个\n"
             f"- 如果无法确定要操作的任务，返回 need_clarification=true 并提供 candidates（最多3条）\n"
