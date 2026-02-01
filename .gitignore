@@ -33,3 +33,4 @@ Thumbs.db
 *.log
 .cache/
 .reminder_sent.json
+docs/
