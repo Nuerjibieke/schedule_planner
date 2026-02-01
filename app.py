@@ -2502,7 +2502,10 @@ if tasks:
                                     timer_start = datetime.fromisoformat(timer_start_match.group(1).strip().replace("Z", "+00:00"))
                                     if timer_start.tzinfo:
                                         timer_start = timer_start.astimezone().replace(tzinfo=None)
-                                    elapsed_since_start = (now - timer_start).total_seconds() / 60
+                                    now_elapsed = datetime.now()
+                                    if now_elapsed.tzinfo:
+                                        now_elapsed = now_elapsed.astimezone().replace(tzinfo=None)
+                                    elapsed_since_start = (now_elapsed - timer_start).total_seconds() / 60
                                     total_work_minutes += int(elapsed_since_start)
                                     progress = min(100, max(0, int((total_work_minutes / task_duration_min) * 100)))
                                 else:
