@@ -132,19 +132,23 @@ _SCHEMA = """
 
 当前时间：{now_iso}，今天日期：{today}，星期：{weekday}。
 
-【相对日期参考】用户说「明天」「后天」「下周一」至「下周日」时，必须使用以下对应日期填写 start_iso/end_iso（格式 YYYY-MM-DDTHH:MM:00）：
+【相对日期参考】用户说「明天」「后天」「下周一」至「下周日」时，必须使用以下对应日期填写 start_iso/end_iso（格式 YYYY-MM-DDTHH:MM:00）。括号内为当日星期，请严格按此表填写：
 {relative_dates}
-- **重要**：例如用户说「下周三17点到17:30开会」时，start_iso 必须为「下周三」对应的日期 + T17:00:00，end_iso 为同一天 T17:30:00，不得按「下周」误解为 7 天后。
+- **重要**：上述日期按「今天」的星期计算（周一=0、周日=6）；若今天为周日则下周三为 3 天后。例如用户说「下周三17点到17:30开会」时，start_iso 必须为表中「下周三」对应的日期 + T17:00:00，end_iso 为同一天 T17:30:00，不得按「下周」误解为 7 天后。
 """
 
 
 def _relative_dates_ref(today: date) -> str:
-    """生成「明天」「下周一」等相对日期参考，供 prompt 注入，避免模型把下周三算成错误日期。"""
+    """
+    生成「明天」「下周一」等相对日期参考（周一=0，周日=6，与 Python weekday 一致）。
+    每个日期后标注星期，便于核对；若「今天」为周日则下周三为 3 天后。
+    """
     tomorrow = today + timedelta(days=1)
     day_after = today + timedelta(days=2)
+    weeknames = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
     def next_weekday(d: date, target_w: int) -> date:
-        # target_w: Mon=0 .. Sun=6
+        # target_w: Mon=0 .. Sun=6（与 Python weekday 一致）
         days = (target_w - d.weekday() + 7) % 7
         if days == 0:
             days = 7
@@ -158,10 +162,13 @@ def _relative_dates_ref(today: date) -> str:
     next_sat = next_weekday(today, 5)
     next_sun = next_weekday(today, 6)
 
+    def _label(d: date) -> str:
+        return f"{d.isoformat()}（{weeknames[d.weekday()]}）"
+
     return (
-        f"明天={tomorrow.isoformat()}，后天={day_after.isoformat()}，"
-        f"下周一={next_mon.isoformat()}，下周二={next_tue.isoformat()}，下周三={next_wed.isoformat()}，"
-        f"下周四={next_thu.isoformat()}，下周五={next_fri.isoformat()}，下周六={next_sat.isoformat()}，下周日={next_sun.isoformat()}。"
+        f"明天={_label(tomorrow)}，后天={_label(day_after)}，"
+        f"下周一={_label(next_mon)}，下周二={_label(next_tue)}，下周三={_label(next_wed)}，"
+        f"下周四={_label(next_thu)}，下周五={_label(next_fri)}，下周六={_label(next_sat)}，下周日={_label(next_sun)}。"
     )
 
 

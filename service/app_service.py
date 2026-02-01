@@ -67,6 +67,46 @@ def _to_iso(dt: datetime) -> str:
         dt = dt.astimezone(timezone.utc)
     return dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
+
+def _local_iso_to_utc_iso(s: str) -> str:
+    """
+    把无时区的 ISO 字符串（如 2026-02-02T16:00:00）视为用户本地时间，转为 UTC 的 ISO 字符串。
+    NLP 返回的「明天 16 点」等均为用户本地时间，若按 UTC 存会导致日历显示错一天/错时间。
+    """
+    if not s or not s.strip():
+        return s
+    s = s.strip()
+    if "+" in s or "Z" in s:
+        return _to_iso(_parse_dt_naive(s))
+    try:
+        dt_naive = datetime.fromisoformat(s[:19].rstrip())
+        local_tz = datetime.now().astimezone().tzinfo
+        if local_tz is None:
+            return _to_iso(dt_naive.replace(tzinfo=timezone.utc))
+        dt_local = dt_naive.replace(tzinfo=local_tz)
+        dt_utc = dt_local.astimezone(timezone.utc)
+        return _to_iso(dt_utc)
+    except Exception:
+        return _to_iso(_parse_dt_naive(s))
+
+
+def _utc_iso_to_local_display(utc_iso: str) -> Tuple[str, str]:
+    """
+    把存储的 UTC ISO 字符串转为用户本地时间的显示：(日期 'YYYY-MM-DD', 时间 'HH:MM')。
+    用于反馈文案，避免用户看到 UTC 时间误以为规划错误。
+    """
+    if not utc_iso or not utc_iso.strip():
+        return ("", "")
+    try:
+        ss = utc_iso.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ss[:26] if "+" in ss else ss[:19])
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone()
+        return (local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M"))
+    except Exception:
+        return (utc_iso[:10] if len(utc_iso) >= 10 else "", utc_iso[11:16] if len(utc_iso) >= 16 else "")
+
 def get_today_tasks() -> List[Task]:
     return repo.tasks_for_date(date.today())
 
@@ -103,7 +143,9 @@ def check_and_reschedule_overdue_tasks() -> Tuple[int, str]:
             "end_time": new_end_iso
         })
         rescheduled_count += 1
-        messages.append(f"- {task.title}：延期到 {new_start_iso[11:16]}–{new_end_iso[11:16]}")
+        d1, t1 = _utc_iso_to_local_display(new_start_iso)
+        _, t2 = _utc_iso_to_local_display(new_end_iso)
+        messages.append(f"- {task.title}：延期到 {d1} {t1}–{t2}")
         # 更新本地今日任务列表，避免下一个任务占用同一时段
         today_tasks = repo.tasks_for_date(today)
 
@@ -591,8 +633,8 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                 continue
             cid = c.get("id")
             title = c.get("title")
-            st = (c.get("start_time") or "")[11:16]
-            et = (c.get("end_time") or "")[11:16]
+            _, st = _utc_iso_to_local_display(c.get("start_time") or "")
+            _, et = _utc_iso_to_local_display(c.get("end_time") or "")
             lines.append(f"- {cid} {st}–{et} {title}")
         msg = "我没法唯一确定你要操作哪条任务，请回复任务 id 或更明确的描述。"
         if lines:
@@ -659,11 +701,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                 start_iso = a.get("start_iso") or a.get("new_start_iso")
                 end_iso = a.get("end_iso") or a.get("new_end_iso")
                 if start_iso and end_iso:
-                    # 规范化：无时区时按 UTC 并统一为 +00:00 格式
-                    if "+" not in start_iso and "Z" not in start_iso:
-                        start_iso = _to_iso(_parse_dt_naive(start_iso))
-                    if "+" not in end_iso and "Z" not in end_iso:
-                        end_iso = _to_iso(_parse_dt_naive(end_iso))
+                    # 无时区的 ISO 视为用户本地时间，转为 UTC 再存，避免日历错日/错时
+                    start_iso = _local_iso_to_utc_iso(start_iso)
+                    end_iso = _local_iso_to_utc_iso(end_iso)
                     log.info("使用指定的时间: %s - %s", start_iso, end_iso)
                 else:
                     log.info("查找空闲时间段，duration=%d分钟", dur)
@@ -692,9 +732,12 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                         repo.update_task(target_task.id, payload)
                         log.info("重新规划：更新已有待办任务 id=%s title=%s -> %s–%s", target_task.id, title, start_iso[:16], end_iso[:16])
                         updated += 1
-                        date_str = start_iso[:10] if len(start_iso) >= 10 else ""
+                        date_str, start_hm = _utc_iso_to_local_display(start_iso)
+                        _, end_hm = _utc_iso_to_local_display(end_iso)
+                        _, old_start_hm = _utc_iso_to_local_display(target_task.start_time)
+                        _, old_end_hm = _utc_iso_to_local_display(target_task.end_time)
                         lines.append(
-                            f"- 重排：{date_str} {start_iso[11:16]}–{end_iso[11:16]} {title}（原 {target_task.start_time[11:16]}–{target_task.end_time[11:16]}）"
+                            f"- 重排：{date_str} {start_hm}–{end_hm} {title}（原 {old_start_hm}–{old_end_hm}）"
                         )
                         day_tasks = repo.tasks_for_date(today)
                         continue
@@ -723,9 +766,10 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     log.exception("任务插入失败: title=%s, error=%s", title, e)
                     raise
                 diff_str = f", {difficulty}" if difficulty in ("easy", "medium", "hard") else ""
-                date_str = created.start_time[:10] if len(created.start_time) >= 10 else ""
+                date_str, start_hm = _utc_iso_to_local_display(created.start_time)
+                _, end_hm = _utc_iso_to_local_display(created.end_time)
                 lines.append(
-                    f"- 新增：{date_str} {created.start_time[11:16]}–{created.end_time[11:16]} {created.title}（{created.priority}{diff_str}，{dur}min）"
+                    f"- 新增：{date_str} {start_hm}–{end_hm} {created.title}（{created.priority}{diff_str}，{dur}min）"
                 )
                 if isinstance(tips, list) and tips:
                     show = [str(x).strip() for x in tips if str(x).strip()]
@@ -767,11 +811,13 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     if progress >= 100:
                         repo.update_task(target.id, {"status": "done"})
                         completed += 1
-                        done_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
-                        lines.append(f"- 完成：{done_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（100%）")
+                        done_date, done_st = _utc_iso_to_local_display(target.start_time)
+                        _, done_et = _utc_iso_to_local_display(target.end_time)
+                        lines.append(f"- 完成：{done_date} {done_st}–{done_et} {target.title}（100%）")
                     else:
-                        prog_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
-                        lines.append(f"- 更新进度：{prog_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}（{progress}%）")
+                        prog_date, prog_st = _utc_iso_to_local_display(target.start_time)
+                        _, prog_et = _utc_iso_to_local_display(target.end_time)
+                        lines.append(f"- 更新进度：{prog_date} {prog_st}–{prog_et} {target.title}（{progress}%）")
                 else:
                     # 没有进度百分比，直接标记为完成，并确保 memo 中写入 progress:100 以便进度条显示 100%
                     current_memo = (target.memo or "").strip()
@@ -783,8 +829,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     new_memo = f"{memo_clean} | progress:100" if memo_clean else "progress:100"
                     repo.update_task(target.id, {"status": "done", "memo": new_memo})
                     completed += 1
-                    done_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
-                    lines.append(f"- 完成：{done_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
+                    done_date, done_st = _utc_iso_to_local_display(target.start_time)
+                    _, done_et = _utc_iso_to_local_display(target.end_time)
+                    lines.append(f"- 完成：{done_date} {done_st}–{done_et} {target.title}")
                 continue
 
             if act == "delete":
@@ -793,8 +840,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     continue
                 repo.delete_task(target.id)
                 deleted += 1
-                del_date = target.start_time[:10] if len(target.start_time) >= 10 else ""
-                lines.append(f"- 删除：{del_date} {target.start_time[11:16]}–{target.end_time[11:16]} {target.title}")
+                del_date, del_st = _utc_iso_to_local_display(target.start_time)
+                _, del_et = _utc_iso_to_local_display(target.end_time)
+                lines.append(f"- 删除：{del_date} {del_st}–{del_et} {target.title}")
                 continue
 
             if act == "update":
@@ -861,7 +909,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     # 异常时直接更新目标任务
                     repo.update_task(target.id, {"start_time": new_start, "end_time": new_end})
                     updated += 1
-                    lines.append(f"- 修改：{target.title} → {new_start[11:16]}–{new_end[11:16]}（排程异常，仅更新当前任务）")
+                    _, ns_hm = _utc_iso_to_local_display(new_start)
+                    _, ne_hm = _utc_iso_to_local_display(new_end)
+                    lines.append(f"- 修改：{target.title} → {ns_hm}–{ne_hm}（排程异常，仅更新当前任务）")
                     continue
 
                 # 若多米诺没有返回任何更新（极端情况下），至少保证当前任务本身被顺延
@@ -869,7 +919,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                     log.warning("run_domino returned empty updated_tasks for task %s, new_start=%s new_end=%s", target.id, new_start, new_end)
                     repo.update_task(target.id, {"start_time": new_start, "end_time": new_end})
                     updated += 1
-                    lines.append(f"- 修改：{target.title} → {new_start[11:16]}–{new_end[11:16]}（未影响其他任务）")
+                    _, ns_hm = _utc_iso_to_local_display(new_start)
+                    _, ne_hm = _utc_iso_to_local_display(new_end)
+                    lines.append(f"- 修改：{target.title} → {ns_hm}–{ne_hm}（未影响其他任务）")
                     if res.overflow_warning:
                         overflow = res.overflow_warning
                     continue
@@ -919,10 +971,10 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                         preview_lines.append("")
                         preview_lines.append(f"📌 调整原因：{update_reason}")
                     for x in updates:
-                        os = (x["old_start"][11:16] if len(x["old_start"]) >= 16 else x["old_start"])
-                        oe = (x["old_end"][11:16] if len(x["old_end"]) >= 16 else x["old_end"])
-                        ns = (x["new_start"][11:16] if len(x["new_start"]) >= 16 else x["new_start"])
-                        ne = (x["new_end"][11:16] if len(x["new_end"]) >= 16 else x["new_end"])
+                        _, os = _utc_iso_to_local_display(x["old_start"])
+                        _, oe = _utc_iso_to_local_display(x["old_end"])
+                        _, ns = _utc_iso_to_local_display(x["new_start"])
+                        _, ne = _utc_iso_to_local_display(x["new_end"])
                         preview_lines.append(f"- {x['title']}：{os}–{oe} → {ns}–{ne}")
                     if res.overflow_warning:
                         preview_lines.append(f"⚠ {res.overflow_warning}")
@@ -938,8 +990,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                 if a.get("memo"):
                     repo.update_task(target.id, {"memo": a.get("memo")})
                 updated += 1
-                upd_date = new_start[:10] if len(new_start) >= 10 else ""
-                lines.append(f"- 修改：{target.title} → {upd_date} {new_start[11:16]}–{new_end[11:16]}（顺延 {shifted} 条）")
+                upd_date, upd_st = _utc_iso_to_local_display(new_start)
+                _, upd_et = _utc_iso_to_local_display(new_end)
+                lines.append(f"- 修改：{target.title} → {upd_date} {upd_st}–{upd_et}（顺延 {shifted} 条）")
                 if res.overflow_warning:
                     overflow = res.overflow_warning
                 continue
@@ -1033,13 +1086,13 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
         
         if not title:
             return cmd.reply_text or "请说明要新增的任务名称与时间。", None, None, reasoning
-        # 单动作新增：也按“当前时间往后空闲块”插入
+        # 单动作新增：也按“当前时间往后空闲块”插入；无时区时间视为本地时间，转 UTC 再存
         if start_iso and end_iso:
-            start = start_iso
-            end = end_iso
+            start = _local_iso_to_utc_iso(start_iso)
+            end = _local_iso_to_utc_iso(end_iso)
         elif cmd.start_iso and cmd.end_iso:
-            start = cmd.start_iso
-            end = cmd.end_iso
+            start = _local_iso_to_utc_iso(cmd.start_iso)
+            end = _local_iso_to_utc_iso(cmd.end_iso)
         else:
             day_tasks = repo.tasks_for_date(today)
             dur = 60
@@ -1064,8 +1117,9 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
             memo=cmd.memo,
         )
         repo.insert_task(t)
-        date_str = start[:10] if len(start) >= 10 else ""
-        time_str = f"（{date_str} {start[11:16]}–{end[11:16]}）" if len(start) >= 16 else (f"（{date_str}）" if date_str else "")
+        date_str, start_hm = _utc_iso_to_local_display(start)
+        _, end_hm = _utc_iso_to_local_display(end)
+        time_str = f"（{date_str} {start_hm}–{end_hm}）" if date_str else ""
         return cmd.reply_text or f"已为您新增任务：{title}{time_str}。", None, None, reasoning
 
     if cmd.intent == "delete":
@@ -1160,10 +1214,10 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
             preview_lines.append("")
             preview_lines.append(f"📌 调整原因：{update_reason}")
         for x in updates:
-            os = (x["old_start"][11:16] if len(x["old_start"]) >= 16 else x["old_start"])
-            oe = (x["old_end"][11:16] if len(x["old_end"]) >= 16 else x["old_end"])
-            ns = (x["new_start"][11:16] if len(x["new_start"]) >= 16 else x["new_start"])
-            ne = (x["new_end"][11:16] if len(x["new_end"]) >= 16 else x["new_end"])
+            _, os = _utc_iso_to_local_display(x["old_start"])
+            _, oe = _utc_iso_to_local_display(x["old_end"])
+            _, ns = _utc_iso_to_local_display(x["new_start"])
+            _, ne = _utc_iso_to_local_display(x["new_end"])
             preview_lines.append(f"- {x['title']}：{os}–{oe} → {ns}–{ne}")
         if res.overflow_warning:
             preview_lines.append(f"⚠ {res.overflow_warning}")

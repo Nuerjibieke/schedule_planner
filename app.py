@@ -4,7 +4,7 @@
 - 右侧：日程时间轴（日期选择 + 时间块可视化）
 """
 import streamlit as st
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import streamlit.components.v1 as components
 
 from db.client import init_supabase
@@ -985,21 +985,34 @@ div[data-testid="column"] > div[style*="display: flex"] {
 </style>
 """, unsafe_allow_html=True)
 
+def _utc_iso_to_local_hour_minute(utc_iso: str):
+    """将存储的 UTC ISO 转为本地 (hour, minute)，用于时间轴块的位置与显示。"""
+    if not utc_iso or len(utc_iso) < 16:
+        return (0, 0)
+    try:
+        s = utc_iso.replace("Z", "+00:00").strip()
+        dt = datetime.fromisoformat(s[:26] if "+" in s else s[:19])
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone()
+        return (local.hour, local.minute)
+    except Exception:
+        return (int(utc_iso[11:13]) if len(utc_iso) >= 13 else 0, int(utc_iso[14:16]) if len(utc_iso) >= 16 else 0)
+
+
 # 时间轴渲染函数（必须在调用之前定义）
 def _task_to_timeline_blocks(tasks: list, day_start_h: int, day_end_h: int) -> list:
     """将任务转为纵向时间轴块：top_px, height_px, color, title, time_str, left, width。
-    支持多任务并排显示，避免重叠。"""
+    支持多任务并排显示，避免重叠。任务时间存 UTC，展示时转为本地时间。"""
     day_start_min = day_start_h * 60
     day_end_min = day_end_h * 60
     blocks = []
     
-    # 第一步：解析所有任务
+    # 第一步：解析所有任务（UTC -> 本地 小时/分钟）
     for t in sorted(tasks, key=lambda x: x.start_time):
         try:
-            sh = int(t.start_time[11:13]) if len(t.start_time) >= 13 else 0
-            sm = int(t.start_time[14:16]) if len(t.start_time) >= 16 else 0
-            eh = int(t.end_time[11:13]) if len(t.end_time) >= 13 else 0
-            em = int(t.end_time[14:16]) if len(t.end_time) >= 16 else 0
+            sh, sm = _utc_iso_to_local_hour_minute(t.start_time or "")
+            eh, em = _utc_iso_to_local_hour_minute(t.end_time or "")
         except (ValueError, TypeError):
             continue
 
@@ -1024,8 +1037,8 @@ def _task_to_timeline_blocks(tasks: list, day_start_h: int, day_end_h: int) -> l
         else:
             color = "#d0ced8"  # 浅色莫兰迪灰紫色
 
-        st_str = t.start_time[11:16] if len(t.start_time) >= 16 else (t.start_time or "")
-        et_str = t.end_time[11:16] if len(t.end_time) >= 16 else (t.end_time or "")
+        st_str = f"{sh:02d}:{sm:02d}"
+        et_str = f"{eh:02d}:{em:02d}"
         blocks.append(
             {
                 "top": float(top_px),
@@ -2186,8 +2199,9 @@ with pomodoro_col:
         if executing_task:
             import re
 
-            st_str = executing_task.start_time[11:16] if len(executing_task.start_time) >= 16 else executing_task.start_time
-            et_str = executing_task.end_time[11:16] if len(executing_task.end_time) >= 16 else executing_task.end_time
+            sh, sm = _utc_iso_to_local_hour_minute(executing_task.start_time or "")
+            eh, em = _utc_iso_to_local_hour_minute(executing_task.end_time or "")
+            st_str, et_str = f"{sh:02d}:{sm:02d}", f"{eh:02d}:{em:02d}"
 
             total_work_minutes = 0
             if executing_task.memo:
@@ -2309,8 +2323,9 @@ with pomodoro_col:
             """, unsafe_allow_html=True)
             
             for idx, t in enumerate(high_priority_tasks[:3]):  # 最多显示3个
-                st_str = t.start_time[11:16] if len(t.start_time) >= 16 else t.start_time
-                et_str = t.end_time[11:16] if len(t.end_time) >= 16 else t.end_time
+                sh, sm = _utc_iso_to_local_hour_minute(t.start_time or "")
+                eh, em = _utc_iso_to_local_hour_minute(t.end_time or "")
+                st_str, et_str = f"{sh:02d}:{sm:02d}", f"{eh:02d}:{em:02d}"
                 
                 task_card_html = f"""
                 <div style="
@@ -2468,8 +2483,9 @@ if tasks:
             with task_cols[col_idx]:
                 # 使用容器包裹任务卡片和按钮，使它们在同一块内
                 with st.container(border=True):
-                    st_str = t.start_time[11:16] if len(t.start_time) >= 16 else t.start_time
-                    et_str = t.end_time[11:16] if len(t.end_time) >= 16 else t.end_time
+                    sh, sm = _utc_iso_to_local_hour_minute(t.start_time or "")
+                    eh, em = _utc_iso_to_local_hour_minute(t.end_time or "")
+                    st_str, et_str = f"{sh:02d}:{sm:02d}", f"{eh:02d}:{em:02d}"
                     
                     # 进度与展示：status=done 时一律显示「已完成」和 100%
                     # 待办任务：仅当用户点了「开始」后才按计时动态更新进度；暂停或未开始时只显示 memo 中保存的进度，不按日历时间自动更新
@@ -3165,10 +3181,43 @@ with st.container(border=True):
     except Exception:
         future_tasks = []
 
+    def _task_display_date_and_time(t: Task) -> tuple[str, str]:
+        """
+        返回 (显示用日期 YYYY-MM-DD, 显示用时间 HH:MM–HH:MM)。
+        兼容旧数据：若当时把「本地时间」误存为 UTC（转成本地后日期会变），则用存储的日期+时分显示。
+        """
+        s, e = t.start_time or "", t.end_time or ""
+        stored_date = s[:10] if len(s) >= 10 else ""
+        stored_time = f"{s[11:16]}–{e[11:16]}" if len(s) >= 16 and len(e) >= 16 else ""
+        if not stored_date:
+            return stored_date, stored_time
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            local_dt = _to_naive_local(dt)
+            local_date = local_dt.date().isoformat()
+            local_time = f"{local_dt.strftime('%H:%M')}–{_to_naive_local(datetime.fromisoformat(e.replace('Z', '+00:00'))).strftime('%H:%M')}" if len(e) >= 16 else stored_time
+            # 旧数据：存的是「本地时间当 UTC」时，转成本地会变成次日 0 点附近，日期错一天
+            if stored_date != local_date and len(s) >= 16:
+                try:
+                    hour = int(s[11:13])
+                    if 6 <= hour <= 23:
+                        return stored_date, stored_time
+                except Exception:
+                    pass
+            return local_date, local_time
+        except Exception:
+            return stored_date, stored_time
+
+    def _task_local_date_iso(t: Task) -> str:
+        return _task_display_date_and_time(t)[0]
+
+    def _task_local_time_range(t: Task) -> str:
+        return _task_display_date_and_time(t)[1]
+
     tasks_by_day: dict[str, list] = {}
     for t in future_tasks:
         try:
-            day_key = (t.start_time or "")[:10]
+            day_key = _task_local_date_iso(t)
             if day_key:
                 tasks_by_day.setdefault(day_key, []).append(t)
         except Exception:
@@ -3209,11 +3258,12 @@ with st.container(border=True):
 """, unsafe_allow_html=True)
 
     if view_mode == "未来一周":
-        # 一周视图：7 列，苹果风格日格 + 事件块
+        # 一周视图：列固定为 周一～周日，每列显示该星期几在「今天起 7 天内」的那一天（按 weekday 对齐）
         head = "".join([f'<div class="cal-month-head">{w}</div>' for w in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]])
         body_parts = []
-        for i in range(7):
-            d = today + timedelta(days=i)
+        for col in range(7):
+            # 列 col = 周(col)，取 [today, today+6] 中 weekday()==col 的那一天
+            d = today + timedelta(days=(col - today.weekday() + 7) % 7)
             day_key = d.isoformat()
             day_tasks = tasks_by_day.get(day_key, [])
             is_today = d == today
@@ -3223,12 +3273,11 @@ with st.container(border=True):
             num_html = f'<div class="cal-day-num{num_cls}">{d.month}月 {num_inner}</div>'
             events_html = ""
             for t in day_tasks:
-                start_str = (t.start_time or "")[11:16] if len(t.start_time or "") >= 16 else ""
-                end_str = (t.end_time or "")[11:16] if len(t.end_time or "") >= 16 else ""
+                time_range = _task_local_time_range(t)
                 pr = (t.priority or "normal").lower()
                 pr_cls = " cal-event--high" if pr == "high" else (" cal-event--low" if pr == "low" else "")
                 title_esc = _escape_html(t.title or "（无标题）")
-                events_html += f'<div class="cal-event{pr_cls}"><span class="cal-event-time">{start_str}–{end_str}</span>{title_esc}</div>'
+                events_html += f'<div class="cal-event{pr_cls}"><span class="cal-event-time">{time_range}</span>{title_esc}</div>'
             empty_label = '<span style="color:#94a3b8;font-size:0.75rem;">无安排</span>'
             body_parts.append(f'<div class="cal-day{today_cls}">{num_html}<div class="cal-day-events">{events_html or empty_label}</div></div>')
         grid_html = f'<div class="cal-apple cal-week"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(body_parts) + "</div>"
