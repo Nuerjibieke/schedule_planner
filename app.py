@@ -3157,8 +3157,8 @@ def _escape_html(s: str) -> str:
 st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div style="margin-bottom: 0.75rem;">
-  <span style="font-weight: 700; color: #1e293b; font-size: 1.05rem;">📅 未来日程</span>
-  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">未来一周或一月的日程概览</span>
+  <span style="font-weight: 700; color: #1e293b; font-size: 1.05rem;">📅 日程日历</span>
+  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">可查看本周/本月（含往期）或未来一周/一月</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -3166,18 +3166,30 @@ with st.container(border=True):
     today = date.today()
     view_mode = st.radio(
         "显示范围",
-        ["未来一周", "未来一月"],
+        ["本周", "未来一周", "本月", "未来一月"],
         horizontal=True,
         key="future_schedule_view",
         label_visibility="collapsed",
     )
-    if view_mode == "未来一周":
+    if view_mode == "本周":
+        # 本周一～本周日，含往期
+        start_d = today - timedelta(days=today.weekday())
+        end_d = start_d + timedelta(days=6)
+    elif view_mode == "未来一周":
+        start_d = today
         end_d = today + timedelta(days=6)
+    elif view_mode == "本月":
+        # 本月 1 号～月末，含往期
+        start_d = today.replace(day=1)
+        _last = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        end_d = _last
     else:
+        # 未来一月
+        start_d = today
         end_d = today + timedelta(days=30)
 
     try:
-        future_tasks = repo.tasks_for_date_range(today, end_d)
+        future_tasks = repo.tasks_for_date_range(start_d, end_d)
     except Exception:
         future_tasks = []
 
@@ -3257,13 +3269,12 @@ with st.container(border=True):
 </style>
 """, unsafe_allow_html=True)
 
-    if view_mode == "未来一周":
-        # 一周视图：列固定为 周一～周日，每列显示该星期几在「今天起 7 天内」的那一天（按 weekday 对齐）
+    if view_mode in ("本周", "未来一周"):
+        # 一周视图：7 列对应 start_d～start_d+6（本周=周一～周日，未来一周=今天～今天+6）
         head = "".join([f'<div class="cal-month-head">{w}</div>' for w in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]])
         body_parts = []
         for col in range(7):
-            # 列 col = 周(col)，取 [today, today+6] 中 weekday()==col 的那一天
-            d = today + timedelta(days=(col - today.weekday() + 7) % 7)
+            d = start_d + timedelta(days=col)
             day_key = d.isoformat()
             day_tasks = tasks_by_day.get(day_key, [])
             is_today = d == today
@@ -3283,8 +3294,8 @@ with st.container(border=True):
         grid_html = f'<div class="cal-apple cal-week"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(body_parts) + "</div>"
         st.markdown(grid_html, unsafe_allow_html=True)
     else:
-        # 一月视图：月历网格，每格日期 + 事件条
-        start_align = today - timedelta(days=today.weekday())
+        # 一月视图：月历网格，从 start_d 所在周的周一开始到 end_d 所在周的周日
+        start_align = start_d - timedelta(days=start_d.weekday())
         end_align = end_d + timedelta(days=(6 - end_d.weekday()))
         cur = start_align
         weeks: list[list[date]] = []
@@ -3299,7 +3310,7 @@ with st.container(border=True):
                 day_key = d.isoformat()
                 day_tasks = tasks_by_day.get(day_key, [])
                 is_today = d == today
-                in_range = today <= d <= end_d
+                in_range = start_d <= d <= end_d
                 other_cls = " cal-month-cell--other" if not in_range else ""
                 today_cell_cls = " cal-month-cell--today" if is_today else ""
                 num_cls = " cal-month-num--today" if is_today else ""

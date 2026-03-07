@@ -107,6 +107,73 @@ def _utc_iso_to_local_display(utc_iso: str) -> Tuple[str, str]:
     except Exception:
         return (utc_iso[:10] if len(utc_iso) >= 10 else "", utc_iso[11:16] if len(utc_iso) >= 16 else "")
 
+
+def _next_weekday(d: date, target_w: int) -> date:
+    """从 d 起下一个 target_w 日（周一=0，周日=6）。若今天就是该星期则返回 7 天后。"""
+    days = (target_w - d.weekday() + 7) % 7
+    if days == 0:
+        days = 7
+    return d + timedelta(days=days)
+
+
+# 用户说「下周五」等时，用于从 user_text 解析出正确日期，纠正模型可能算错的星期
+_RELATIVE_DAY_PHRASES = [
+    ("下周一", 0), ("下周二", 1), ("下周三", 2), ("下周四", 3),
+    ("下周五", 4), ("下周六", 5), ("下周日", 6),
+]
+
+
+def _get_relative_date_from_user_text(user_text: str, today: date) -> Optional[date]:
+    """若 user_text 包含「下周一」～「下周日」，返回对应的正确日期；否则 None。"""
+    if not (user_text or "").strip():
+        return None
+    for phrase, w in _RELATIVE_DAY_PHRASES:
+        if phrase in user_text:
+            return _next_weekday(today, w)
+    return None
+
+
+def _correct_date_in_iso(iso_str: str, new_date: date) -> str:
+    """把 ISO 字符串里的日期部分替换为 new_date，保留时间部分。"""
+    if not iso_str or len(iso_str) < 10:
+        return iso_str
+    return new_date.isoformat() + iso_str[10:]
+
+
+def _correct_relative_dates_in_actions(user_text: str, today: date, actions: Optional[List[Dict]]) -> None:
+    """
+    当用户说了「下周五」等相对星期时，若模型返回的日期星期不对（如把下周五算成周二），
+    用我们算出的正确日期覆盖 action 里的 new_start_iso/new_end_iso 或 start_iso/end_iso。
+    """
+    correct_date = _get_relative_date_from_user_text(user_text, today)
+    if correct_date is None:
+        return
+    expected_weekday = correct_date.weekday()
+    for a in (actions or []):
+        if not isinstance(a, dict):
+            continue
+        for key_start, key_end in [("new_start_iso", "new_end_iso"), ("start_iso", "end_iso")]:
+            start_iso = a.get(key_start)
+            if not start_iso or len(start_iso) < 10:
+                continue
+            try:
+                action_date_str = start_iso[:10]
+                action_date = date.fromisoformat(action_date_str)
+                if action_date.weekday() != expected_weekday:
+                    a[key_start] = _correct_date_in_iso(start_iso, correct_date)
+                    end_iso = a.get(key_end)
+                    if end_iso and len(end_iso) >= 10:
+                        a[key_end] = _correct_date_in_iso(end_iso, correct_date)
+                    log.info(
+                        "相对日期纠正: 用户含「下周X」-> 应为 %s（%s），将 %s 改为该日期",
+                        correct_date.isoformat(),
+                        "一二三四五六日"[expected_weekday],
+                        action_date_str,
+                    )
+            except Exception:
+                pass
+
+
 def get_today_tasks() -> List[Task]:
     return repo.tasks_for_date(date.today())
 
@@ -617,7 +684,10 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
     ]
     cmd = parse_user_command(user_text, today, day_tasks=tasks_ctx, now_dt=now_dt, conversation_history=conversation_history)
     reasoning = getattr(cmd, "reasoning", None) or (cmd.reasoning if hasattr(cmd, "reasoning") else None)
-    
+
+    # 当用户说「下周五」等时，若模型返回的日期星期错误，用我们算出的正确日期纠正
+    _correct_relative_dates_in_actions(user_text, today, cmd.actions)
+
     # 调试日志：检查解析结果
     log.info("parse_user_command result: intent=%s, actions=%s, actions_len=%s", 
              cmd.intent, 
@@ -742,7 +812,15 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                         day_tasks = repo.tasks_for_date(today)
                         continue
 
-                log.info("准备创建Task对象: title=%s, start_iso=%s, end_iso=%s, priority=%s", title, start_iso, end_iso, pr)
+                # 记录过去某天已做的事：NLP 会返回 status="done"，避免被逾期重排到未来
+                task_status = "done" if a.get("status") == "done" else "pending"
+                # 兜底：若插入的任务结束日期早于今天，视为“记录过去”，直接标为已完成，避免被逾期重排
+                if task_status == "pending" and end_iso:
+                    end_local_date = _parse_dt_local_date(end_iso)
+                    if end_local_date is not None and end_local_date < today:
+                        task_status = "done"
+                        log.info("插入任务结束日早于今天，视为记录过去，自动标为 done: title=%s end_local=%s", title, end_local_date)
+                log.info("准备创建Task对象: title=%s, start_iso=%s, end_iso=%s, priority=%s, status=%s", title, start_iso, end_iso, pr, task_status)
                 try:
                     t = Task(
                         id=None,
@@ -750,7 +828,7 @@ def handle_user_command(user_text: str, conversation_history: Optional[List[Dict
                         end_time=end_iso,
                         title=title,
                         priority=pr if pr in ("high", "normal", "low") else "normal",
-                        status="pending",
+                        status=task_status,
                         is_fixed=bool(a.get("is_fixed", False)),
                         memo=final_memo,
                     )
