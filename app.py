@@ -3,6 +3,7 @@
 - 左侧：对话与控制（聊天框、生成周报、撤销）
 - 右侧：日程时间轴（日期选择 + 时间块可视化）
 """
+from __future__ import annotations
 import streamlit as st
 from datetime import date, datetime, timedelta, timezone
 import streamlit.components.v1 as components

@@ -2,6 +2,7 @@
 日程提醒检查：拉取今日任务，在开始前/到时发送系统桌面通知。
 供 app.py 的 fragment 与 run_reminder_daemon.py 共用。
 """
+from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
