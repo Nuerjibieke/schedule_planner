@@ -1099,6 +1099,52 @@ def _utc_iso_to_local_hour_minute(utc_iso: str):
         return (int(utc_iso[11:13]) if len(utc_iso) >= 13 else 0, int(utc_iso[14:16]) if len(utc_iso) >= 16 else 0)
 
 
+# 时间轴调色板：浅色系，保证文本可读；同任务稳定同色。
+_TIMELINE_COLOR_PALETTE = [
+    "#F8D9D6",  # rose
+    "#FBE4C8",  # apricot
+    "#F7EAB8",  # sand
+    "#DDECCF",  # sage
+    "#CFE8DE",  # mint
+    "#CFE6F2",  # sky
+    "#D8DDF7",  # periwinkle
+    "#E2D9F5",  # lavender
+    "#F0D8EA",  # mauve
+    "#E8E1D8",  # clay
+]
+
+
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    s = str(hex_color or "").strip().lstrip("#")
+    if len(s) != 6:
+        return (208, 206, 216)
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+
+def _stable_color_index(seed: str, palette_size: int) -> int:
+    if palette_size <= 0:
+        return 0
+    h = 0
+    for ch in (seed or ""):
+        h = (h * 131 + ord(ch)) & 0xFFFFFFFF
+    return h % palette_size
+
+
+def _timeline_block_colors(task: Task) -> tuple[str, str]:
+    seed = f"{getattr(task, 'id', '')}|{getattr(task, 'title', '')}"
+    idx = _stable_color_index(seed, len(_TIMELINE_COLOR_PALETTE))
+    r, g, b = _hex_to_rgb(_TIMELINE_COLOR_PALETTE[idx])
+
+    is_done = str(getattr(task, "status", "") or "").lower() == "done"
+    is_high = str(getattr(task, "priority", "") or "").lower() == "high"
+
+    bg_alpha = 0.42 if is_done else (0.98 if is_high else 0.82)
+    border_alpha = 0.65 if is_done else (0.95 if is_high else 0.78)
+    bg = f"rgba({r}, {g}, {b}, {bg_alpha:.2f})"
+    border = f"rgba({r}, {g}, {b}, {border_alpha:.2f})"
+    return bg, border
+
+
 # 时间轴渲染函数（必须在调用之前定义）
 def _task_to_timeline_blocks(tasks: list, day_start_h: int, day_end_h: int) -> list:
     """将任务转为纵向时间轴块：top_px, height_px, color, title, time_str, left, width。
@@ -1129,12 +1175,7 @@ def _task_to_timeline_blocks(tasks: list, day_start_h: int, day_end_h: int) -> l
         top_px = clipped_start - day_start_min
         height_px = max(18, clipped_end - clipped_start)
 
-        if t.status == "done":
-            color = "#d0ddd0"  # 浅色莫兰迪灰绿色
-        elif t.priority == "high":
-            color = "#e0d5d0"  # 浅色莫兰迪灰红色
-        else:
-            color = "#d0ced8"  # 浅色莫兰迪灰紫色
+        color, border_color = _timeline_block_colors(t)
 
         st_str = f"{sh:02d}:{sm:02d}"
         et_str = f"{eh:02d}:{em:02d}"
@@ -1145,6 +1186,7 @@ def _task_to_timeline_blocks(tasks: list, day_start_h: int, day_end_h: int) -> l
                 "start_min": clipped_start,
                 "end_min": clipped_end,
                 "color": color,
+                "border_color": border_color,
                 "title": t.title or "",
                 "time_str": f"{st_str}–{et_str}",
                 "left": 0.0,  # 待计算
@@ -1217,7 +1259,7 @@ def _render_timeline_blocks(view_d: date, tasks: list, start_h: int, end_h: int)
     block_divs = "".join(
         [
             (
-                f'<div class="tl-block" style="top:{b["top"]:.0f}px;left:calc({b["left"]:.2f}% + 8px);width:calc({b["width"]:.2f}% - 16px);height:{b["height"]:.0f}px;background:{b["color"]};"'
+                f'<div class="tl-block" style="top:{b["top"]:.0f}px;left:calc({b["left"]:.2f}% + 8px);width:calc({b["width"]:.2f}% - 16px);height:{b["height"]:.0f}px;background:{b["color"]};border-color:{b.get("border_color", "rgba(220,218,214,0.4)")};border-left:4px solid {b.get("border_color", "rgba(220,218,214,0.4)")};"'
                 f' title="{b["time_str"]}">'
                 f'  <div class="tl-block-title">{(b["title"] or "")}</div>'
                 f'  <div class="tl-block-time">{b["time_str"]}</div>'
@@ -2486,9 +2528,7 @@ with st.container(border=True):
               border: 1px solid rgba(148, 163, 184, 0.2);
             ">
               <span style="color: #7a7872; font-weight: 500; font-size: 0.75rem;">
-                💡 <span style="color: #7a7872;">🔵 普通</span> | 
-                <span style="color: #ef4444;">🔴 高优</span> | 
-                <span style="color: #10b981;">🟢 已完成</span>
+                💡 不同任务块使用不同颜色（同任务同色） | <span style="color: #ef4444;">🔴 高优先级更显眼</span> | <span style="color: #10b981;">🟢 已完成更淡</span>
               </span>
             </div>
             """, unsafe_allow_html=True)
@@ -2551,9 +2591,7 @@ with st.container(border=True):
               border: 1px solid rgba(148, 163, 184, 0.2);
             ">
               <span style="color: #64748b; font-weight: 500; font-size: 0.7rem;">
-                💡 <span style="color: #7a7872;">🔵 普通</span> | 
-                <span style="color: #ef4444;">🔴 高优</span> | 
-                <span style="color: #10b981;">🟢 已完成</span>
+                💡 不同任务块使用不同颜色（同任务同色） | <span style="color: #ef4444;">🔴 高优先级更显眼</span> | <span style="color: #10b981;">🟢 已完成更淡</span>
               </span>
             </div>
             """, unsafe_allow_html=True)
