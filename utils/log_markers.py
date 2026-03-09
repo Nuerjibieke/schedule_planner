@@ -1,0 +1,8 @@
+"""统一关键链路日志标记。"""
+
+LOG_AGENT = "◆AGENT◆"
+LOG_TOOL = "◆TOOL◆"
+LOG_ACTION = "◆ACTION◆"
+LOG_VERIFY = "◆VERIFY◆"
+LOG_ROLLBACK = "◆ROLLBACK◆"
+

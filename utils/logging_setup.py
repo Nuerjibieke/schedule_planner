@@ -76,7 +76,7 @@ def setup_logging() -> None:
     root_logger.handlers.clear()
     
     # 降噪：httpx/httpcore/hpack 在 DEBUG 时会极其啰嗦
-    for noisy in ("httpx", "httpcore", "hpack"):
+    for noisy in ("httpx", "httpcore", "hpack", "openai._base_client", "openai"):
         logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
 
     # 标准输出handler
@@ -100,4 +100,3 @@ def setup_logging() -> None:
 def get_recent_logs(limit: int = 100) -> List[dict]:
     """获取最近的日志条目"""
     return list(_log_buffer)[-limit:]
-

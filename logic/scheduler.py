@@ -20,11 +20,15 @@ class DominoResult:
 
 
 def _parse_dt(s: str) -> datetime:
-    if s.endswith("Z"):
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
-    if "+" in s or (len(s) >= 6 and s[-6] in "+-" and s[-3] == ":"):
-        return datetime.fromisoformat(s)
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    """
+    统一解析为 UTC naive，避免 aware/naive 混比异常。
+    约定：无时区输入视为 UTC。
+    """
+    raw = str(s or "").replace("Z", "+00:00")
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.replace(microsecond=0)
 
 
 def _to_iso(dt: datetime) -> str:
@@ -74,18 +78,31 @@ def run_domino(
                 title=t.title, priority=t.priority, status=t.status,
                 is_fixed=t.is_fixed, memo=t.memo, created_at=t.created_at,
             )
-    # 已占用的区间：锚点 + 顺延后的任务，用于骨牌
+
+    # 已占用的区间：锚点，用于骨牌防重叠
     placed: List[Tuple[datetime, datetime]] = list(anchors)
+    
     for t in movables:
         st = _parse_dt(t.start_time)
         et = _parse_dt(t.end_time)
         duration_sec = (et - st).total_seconds()
+        
         new_st = st
-        for (a_s, a_e) in placed:
-            if st < a_e and a_s < et:
-                if a_e > new_st:
-                    new_st = a_e
         new_et = new_st + timedelta(seconds=duration_sec)
+        
+        # 循环检测冲突并推挤，直到当前任务(new_st ~ new_et)不再与任何已占据区间(a_s ~ a_e)重叠
+        has_conflict = True
+        while has_conflict:
+            has_conflict = False
+            for (a_s, a_e) in placed:
+                # 严格相交判定 (不包含边界相接的情况)
+                if new_st < a_e and a_s < new_et:
+                    # 发生重叠，把当前任务推挤到该占据区间的末尾
+                    new_st = a_e
+                    new_et = new_st + timedelta(seconds=duration_sec)
+                    has_conflict = True
+                    break # 跳出 for 循环，重新用新的时间跑一遍 while 循环检测
+                    
         id_to_task[t.id] = Task(
             id=t.id, start_time=_to_iso(new_st), end_time=_to_iso(new_et),
             title=t.title, priority=t.priority, status=t.status,

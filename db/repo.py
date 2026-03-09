@@ -1,6 +1,6 @@
 """数据仓库：对 Supabase 的增删改查。"""
-from datetime import datetime, date
-from typing import List, Optional
+from datetime import datetime, date, time, timezone
+from typing import List, Optional, Tuple
 
 from .client import (
     get_supabase,
@@ -13,8 +13,42 @@ from .client import (
 )
 from .models import Task, Snapshot, Summary, Reminder, LongTask, LongTaskLog
 import logging
+from utils.log_markers import LOG_ACTION
 
 log = logging.getLogger("api.supabase")
+
+
+def _local_tz():
+    tz = datetime.now().astimezone().tzinfo
+    return tz or timezone.utc
+
+
+def _local_day_bounds_utc(d: date) -> Tuple[str, str]:
+    """
+    将“本地日期 d 的 00:00:00~23:59:59”转换为 UTC ISO 边界。
+    避免凌晨本地任务（如 02:00）被按 UTC 归到前一天导致查不到。
+    """
+    tz = _local_tz()
+    start_local = datetime.combine(d, time(0, 0, 0)).replace(tzinfo=tz)
+    end_local = datetime.combine(d, time(23, 59, 59)).replace(tzinfo=tz)
+    start_utc = start_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    end_utc = end_local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    return start_utc, end_utc
+
+
+def _parse_iso_to_local_naive(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_local_tz()).replace(tzinfo=None)
+    except Exception:
+        try:
+            return datetime.fromisoformat(str(value)[:19])
+        except Exception:
+            return None
 
 
 def _log_result(action: str, r) -> None:
@@ -26,18 +60,19 @@ def _log_result(action: str, r) -> None:
         n = len(data) if isinstance(data, list) else (1 if data else 0)
     except Exception:
         n = -1
-    log.info("%s status=%s error=%s data_len=%s", action, status, err, n)
+    is_write = action.startswith(("insert_task", "update_task", "delete_task", "save_snapshot"))
+    prefix = f"{LOG_ACTION} " if is_write else ""
+    log.info("%s%s status=%s error=%s data_len=%s", prefix, action, status, err, n)
     if log.isEnabledFor(logging.DEBUG):
         # DEBUG 才打印数据（截断），避免刷屏/泄露
         s = str(data)
-        log.debug("%s data=%s", action, s[:1200] + ("..." if len(s) > 1200 else ""))
+        log.debug("%s%s data=%s", prefix, action, s[:1200] + ("..." if len(s) > 1200 else ""))
 
 
 def tasks_for_date(d: date) -> List[Task]:
     """取某日全部任务，按 start_time 排序。"""
     sb = get_supabase()
-    day_start = d.isoformat() + "T00:00:00"
-    day_end = d.isoformat() + "T23:59:59"
+    day_start, day_end = _local_day_bounds_utc(d)
     r = sb.table(TASKS_TABLE).select("*").gte("start_time", day_start).lte("start_time", day_end).order("start_time").execute()
     _log_result(f"tasks_for_date({d.isoformat()})", r)
     return [Task.from_row(x) for x in (r.data or [])]
@@ -46,7 +81,7 @@ def tasks_for_date(d: date) -> List[Task]:
 def tasks_overdue_pending(before_date: date) -> List[Task]:
     """取开始时间早于 before_date 且 status 为 pending、未锁定的任务，按 start_time 排序。用于延期到今日。"""
     sb = get_supabase()
-    before_iso = before_date.isoformat() + "T00:00:00"
+    before_iso, _ = _local_day_bounds_utc(before_date)
     r = (
         sb.table(TASKS_TABLE)
         .select("*")
@@ -68,8 +103,8 @@ def tasks_for_date_range(start_d: date, end_d: date) -> List[Task]:
     if end_d < start_d:
         start_d, end_d = end_d, start_d
     sb = get_supabase()
-    start_iso = start_d.isoformat() + "T00:00:00"
-    end_iso = end_d.isoformat() + "T23:59:59"
+    start_iso, _ = _local_day_bounds_utc(start_d)
+    _, end_iso = _local_day_bounds_utc(end_d)
     r = (
         sb.table(TASKS_TABLE)
         .select("*")
@@ -94,8 +129,15 @@ def task_by_id(task_id: str) -> Optional[Task]:
 def task_by_start_time(day: date, start_iso: str) -> Optional[Task]:
     """按日期 + 开始时间查找任务（用于「下午两点的会」这类描述）。"""
     tasks = tasks_for_date(day)
+    needle_dt = _parse_iso_to_local_naive(start_iso)
+    needle_hm = needle_dt.strftime("%H:%M") if needle_dt else (str(start_iso)[11:16] if isinstance(start_iso, str) and len(start_iso) >= 16 else "")
     for t in tasks:
-        if t.start_time.startswith(day.isoformat()) and start_iso in t.start_time:
+        local_start = _parse_iso_to_local_naive(t.start_time)
+        if local_start is None:
+            continue
+        if local_start.date() != day:
+            continue
+        if needle_hm and local_start.strftime("%H:%M") == needle_hm:
             return t
     return None
 
@@ -103,8 +145,7 @@ def task_by_start_time(day: date, start_iso: str) -> Optional[Task]:
 def tasks_by_title(day: date, title_keyword: str, limit: int = 5) -> List[Task]:
     """按日期 + 标题关键词模糊查找（用于「写代码做完了」这类描述）。"""
     sb = get_supabase()
-    day_start = day.isoformat() + "T00:00:00"
-    day_end = day.isoformat() + "T23:59:59"
+    day_start, day_end = _local_day_bounds_utc(day)
     kw = (title_keyword or "").strip()
     if not kw:
         return []

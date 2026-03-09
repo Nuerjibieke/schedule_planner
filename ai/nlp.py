@@ -28,234 +28,121 @@ except Exception:
 log = logging.getLogger("api.openai.nlp")
 
 
-IntentType = Literal["insert", "update", "delete", "query", "plan"]
-
-
-@dataclass
-class CommandIntent:
-    """解析后的标准单，给逻辑层使用。"""
-    intent: IntentType
-    # 目标：update/delete 时用。可为 task_id 或由「日期+时间描述」解析出的 target_start_iso
-    target_task_id: Optional[str] = None
-    target_start_iso: Optional[str] = None  # 如 "2025-01-28T14:00:00"
-    # 变更参数：update 时
-    delta_minutes: Optional[int] = None
-    new_start_iso: Optional[str] = None
-    new_end_iso: Optional[str] = None
-    # 新增任务：insert 时
-    title: Optional[str] = None
-    start_iso: Optional[str] = None
-    end_iso: Optional[str] = None
-    priority: Optional[Literal["high", "normal", "low"]] = None
-    # 备注（如「老板加塞汇报」）
-    memo: Optional[str] = None
-    # 自然语言回复，给用户看
-    reply_text: Optional[str] = None
-    # LLM 思考过程（如何理解用户意图），供用户查看
-    reasoning: Optional[str] = None
-    # 整体规划原因（plan intent时提供）
-    planning_reason: Optional[str] = None
-    # 多动作：允许一句话拆成多条操作（新增/修改/完成/删除/计划）
-    actions: Optional[list] = None
-    # 需要澄清（例如多任务同名、时间不明确等）
-    need_clarification: Optional[bool] = None
-    candidates: Optional[list] = None
-
-    def to_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v is not None}
+from .models import IntentType, CommandIntent
+from .guardrails import parse_natural_time as _parse_natural_time
 
 
 _SCHEMA = """
-你是日程助理，只负责把用户自然语言拆解为结构化 JSON 操作清单（不做排班计算）。
+你是日程助理，只负责把用户自然语言拆解为结构化 JSON 提取结果。
+请不要自行推算跨月跨周的绝对日期，所有的日期推算、模糊匹配和规则将在你输出 JSON 后由底层代码兜底。
 请只返回一份 JSON，不要任何额外文字、不要 markdown 代码块包裹。
 
-【非常重要】当 intent 为 "plan" 时，必须提供 planning_reason 字段，详细说明规划思路。planning_reason 必须包含：
-1. 为什么这样安排任务的顺序（例如：先完成高优先级任务，再处理需要长时间专注的任务）
-2. 为什么这样分配时间（例如：将需要深度思考的任务安排在上午，将简单任务安排在下午）
-3. 为什么这样设置优先级（例如：根据任务的重要性和紧急性）
-4. 考虑了什么因素（例如：任务之间的依赖关系、用户的工作习惯、任务难度等）
-必须提供具体、详细的规划理由（至少50字），不能只是"今天的任务安排"这样泛泛的描述。如果没有提供详细的planning_reason，用户将无法信任规划结果。
-
-【重要】actions 中每条记录的 title 必须是“要排入日程的具体事项名称”，不能包含：
-- 用户对系统的请求（如“并给我执行建议”“安排到下班前”“从现在开始安排”等）
-- 句尾的祈使、补充说明（如“并给我执行建议。”应忽略，不单独作为一条任务）
-只把真正的待办/任务名放入 title，例如用户说“今天的任务是：agent开发（2小时），模型调研（1小时）。从现在开始安排到下班前，并给我执行建议。”则只输出两条 action：title 分别为“agent开发”“模型调研”。
+【非常重要】当 intent 为 "plan" 时，必须提供 planning_reason 字段，详细说明规划思路（至少50字）：
+1. 为什么这样安排任务顺序 2. 为什么这样分配时间 3. 考虑了什么因素。
+不能只是泛泛的描述。
 
 输出格式（严格按此 JSON 结构）：
-{{
-  "intent": "insert" | "update" | "delete" | "query" | "plan",
-  "planning_reason": "整体规划原因（plan intent时必需，详细说明规划思路）",
+{
+  "intent": "insert" | "update" | "delete" | "query" | "plan" | "replan_all",
+  "planning_reason": "整体规划原因（plan 时必需，详细说明思路）",
+  "desired_state": [
+    {
+      "id": "可选，已有任务ID（更新时建议提供）",
+      "title": "任务标题",
+      "start_iso": "可选，开始时间 ISO",
+      "end_iso": "可选，结束时间 ISO",
+      "priority": "high" | "normal" | "low",
+      "status": "pending" | "done",
+      "is_fixed": true或false,
+      "memo": "可选备注"
+    }
+  ],
   "actions": [
-    {{
+    {
       "action": "insert" | "update" | "delete" | "complete" | "plan",
-      "title": "任务名称（仅真实待办，见上方说明）",
+      "target_title_expr": "任务名称（要操作的原任务名或新创建的待办名，原样提取）",
       "difficulty": "easy" | "medium" | "hard",
-      "duration_minutes": 数字,
+      "new_duration_minutes": 数字(可选，表示任务需要改成耗时X分钟),
       "tips": ["建议1", "建议2"],
       "priority": "high" | "normal" | "low",
-      "reason": "该任务的时间安排和优先级规划原因（可选，plan action时提供）",
-      "target_task_id": "可选",
-      "target_time_desc": "可选",
-      "target_title": "可选",
-      "delta_minutes": "可选",
-      "new_start_iso": "可选",
-      "new_end_iso": "可选",
-      "start_iso": "可选，insert/plan 且用户指定了该任务开始时刻时必填，格式：今日T HH:MM:00",
-      "end_iso": "可选，insert/plan 且用户指定了该任务结束时刻时必填，格式：今日T HH:MM:00",
-      "memo": "可选",
-      "status": "可选，仅当【记录过去某天已做的事】时必填 'done'，表示已完成记录不参与逾期重排"
-    }}
+      "reason": "该任务的时间安排和优先级规划原因（可选）",
+      "start_time_expr": "可选，用户原话中对开始时间的描述，如『明天下午两点』『等会』『原样提取』",
+      "end_time_expr": "可选，用户原话中对结束时间的描述",
+      "delta_minutes": "可选，推迟/提前的具体分钟数，如 60 或 -30（如果是推迟没有说多久，不填）",
+      "progress_percentage": "可选，如用户说完成50%，填 50 (数字)",
+      "is_past_record": true或false (当用户说『从X点到现在看了书』『昨天写了代码』时，此项为true)
+    }
   ],
   "reply_text": "一句简短中文，描述我将做什么",
-  "reasoning": "可选，2-5句话说明：① 用户这句话的意图是什么；② 你匹配到了哪条/哪些任务（或为何新建）；③ 你将执行什么操作（思考过程，供用户查看）"
-}}
+  "reasoning": "2-5句话说明：① 用户意图 ② 识别出的关键信息 ③ 你判定的操作（供查看思考过程）"
+}
 
-- intent 为 "plan" 时：把用户描述的"今天要做的待办"逐条拆成 action="plan"，每条给 title、duration_minutes、difficulty、tips、reason。**必须提供 planning_reason 字段，详细说明规划思路（至少50字）**。当用户为每条任务给出了具体起止时间（如「13点开始讨论研究方向，到14点。14点半到16点开组会」），每个 action **必须**填写 start_iso 和 end_iso（格式：今日T时:分:00，如 2026-01-30T13:00:00、2026-01-30T14:00:00；14点半即 T14:30:00），否则系统会按「最早空闲段」排入导致时间错误。
-- title：仅填具体事项名，不填“并给我执行建议”等对系统的请求。
-- duration_minutes：根据用户说的“x小时”或任务难度估算，单位分钟。
-- difficulty：根据任务复杂度评估（easy=简单，medium=中等，hard=困难）。
-- tips：提供2-4条具体的执行建议，要详细且可操作。
-- reason：说明为什么这样安排时间、设置优先级和难度，例如"该任务需要专注时间，安排在上午效率更高"或"这是高优先级任务，需要优先完成"。
-- planning_reason：详细说明整体规划思路，必须包含：为什么这样安排任务的顺序、为什么这样分配时间、为什么这样设置优先级、考虑了什么因素。至少50字以上，要能让用户理解你的规划逻辑。不能只是"今天的任务安排"这样泛泛的描述。
-- reply_text：一句中文，不描述具体时间计算结果。
-- reasoning：用 2-5 句话说明思考过程：① 用户这句话的意图是什么；② 你匹配到了哪条任务（或为何判断为新建）；③ 你将执行什么操作。不要只写一句，要能让用户看到完整的理解过程。
-- **重要**：如果用户说"已完成X%"或"完成X%"（X为0-100的数字），这是更新任务进度，不是标记为完成。请返回 action="complete"，并在 memo 字段中包含进度百分比（如"已完成50%"或"progress:50"）。只有当用户明确说"完成"或"已完成"（没有百分比）时，才标记为100%完成。
-- **重要**：当用户说「X是A点到B点」或「X是A到B点」（指定某任务的起止时刻）时，必须返回 update 意图，并给出 **new_start_iso** 和 **new_end_iso**（格式为今日日期 T 小时:00:00），不要使用 delta_minutes。例如「研究问题讨论会议是15到16点」应返回 new_start_iso=今日T15:00:00、new_end_iso=今日T16:00:00。只有用户说「推迟」「延后」「晚一点」等未指定具体时刻时，才用 delta_minutes。
-- **重要**：如果用户说"无法开始X"、"无法在X点开始Y"、"不能在X点做Y"、"我无法开始X"、"无法在目前规划的时间内做X"、"无法在计划的时间内做X"、"无法在安排的时间内做X"、"我无法在目前规划的时间内做X"等，这是表示需要调整任务时间，应该返回 update 意图（不是 query 或 need_clarification），target_task_id 为任务X或Y的 id，并给出 delta_minutes（如+60表示推迟1小时）或新的时间安排。如果用户没有明确说明新时间，可以默认推迟1小时（delta_minutes=60）。不要返回 query 或 need_clarification 意图。
-- **重要**：如果用户说"时间需要X分钟"、"时长为X"、"需要X时间"、"时间改为X"、"改成X分钟"等（X为数字，可能带"分钟"、"小时"、"半"等），这是表示要调整任务的时长（duration_minutes），不是推迟时间（delta_minutes）。请返回 update 意图，给出 target_task_id 和 duration_minutes（将X转换为分钟，如"半小时"=30，"1小时"=60，"30分钟"=30）。如果用户同时说"必须今天做"或"今天做完"，还需要调整开始时间以确保今天能完成。
-- **重要**：如果用户对之前的操作结果不满意（如说"不行"、"不对"、"需要今天做"等），请根据对话历史中的预览计划，理解用户要修改的是哪个任务，返回 update 意图并给出 target_task_id。不要返回 plan 或 insert 意图。
-- **非常重要**：区分 insert 和 update 意图：
-  - 如果用户说"记录"、"添加"、"新增"、"安排"、"加入"等关键词，并且提到了**新的任务名称**（该任务名称不在当日任务列表中），这应该被识别为 **insert** 意图，创建新任务。例如"记录21点开始阅读书籍，半小时"应该被识别为插入新任务"阅读书籍"，从21:00开始，持续30分钟。
-  - 只有当用户明确提到**现有任务**的名称或ID时，才应该识别为 **update** 意图。例如"把agent开发推迟半小时"是update，因为"agent开发"是现有任务。
-  - 如果用户提到的新任务名称与现有任务名称完全不同，必须识别为 insert，不要误识别为 update。
-- **【记录已发生的事】优先规则**：当用户说"从X点到现在我在做Y"、"从X点到刚才我在做Y"、"X点到现在一直在做Y"、"刚才从X点到现在在Y"等（X为小时，Y为**具体做的事/任务名**），这是在**记录已经发生过的活动**，不是要完成或修改当日任务列表里的任何现有任务。必须识别为 **insert** 意图：action="insert"，title=Y（如"调试日程助手代码"），start_iso=今日T X:00:00+00:00（或今日T X:00:00），end_iso=**当前时间**（使用上文给出的「当前时间」的完整值，如 2026-01-29T09:03:24+00:00）。不要返回 complete/update 现有任务，不要用当日任务列表里的任务名去匹配Y。
-- **【记录过去某天已做的事】优先规则**：当用户说「X号还做了A」「X号还看了B」「X号写了C」「2.2号还看了论文、写了代码」等（X为**过去某天**的日期，如 2.2号、2月2日、昨天，A/B/C 为具体事项），这是在**记录过去某天已发生的活动**，不是添加未来待办。必须识别为 **insert** 意图，每条 action：title=事项名，start_iso 与 end_iso 为**该日期 X** 的合理时段（格式 YYYY-MM-DDTHH:MM:00，如 2026-02-02T09:00:00、2026-02-02T12:00:00；若用户未说具体时间可用该日 09:00–12:00 等合理区间或全天），并**必须**在每条 action 中提供 **"status": "done"**，表示已完成记录，系统不会将其当作待办延期到未来日期。reply_text 可为「已记录你在X号的活动」。
-- **【重新规划待办】优先规则**：当用户说"重新规划待完成的任务"、"按当前时间重新安排"、"获取当前系统时间重新规划安排待完成的任务"、"重新安排今天的待办"、"重新排一下今天的待办"、"根据当前时间重新规划"等时，这是要求**根据当前时间重新规划当日尚未完成的任务**。必须识别为 **plan** 意图（不是 query）。**必须为【当日日程上下文】中每一条 status 为 "pending" 的任务各生成一个 action="plan"，不能遗漏任何一条待办。** 每条 action：title 为该项任务的 title，start_iso 与 end_iso 从**当前时间**开始顺延（第一条从当前时间开始，下一条从上一条的 end_iso 开始）；duration_minutes 可根据该任务原有的 start_time/end_time 推算分钟数，或给 30/60 等合理默认值；priority、difficulty、tips、reason 可参考原任务或合理推断。必须填写 planning_reason，说明为何按当前时间重新排布以及任务顺序理由（至少50字）。若当日没有 pending 任务，仍返回 intent=plan、actions=[]、planning_reason 说明“当日暂无待办”，reply_text 说明已检查无待办即可。
-
-当前时间：{now_iso}，今天日期：{today}，星期：{weekday}。
-
-【相对日期参考】用户说「明天」「后天」「下周一」至「下周日」时，必须使用以下对应日期填写 start_iso/end_iso（格式 YYYY-MM-DDTHH:MM:00）。括号内为当日星期，请严格按此表填写：
-{relative_dates}
-- **重要**：上述日期按「今天」的星期计算（周一=0、周日=6）；若今天为周日则下周三为 3 天后。例如用户说「下周三17点到17:30开会」时，start_iso 必须为表中「下周三」对应的日期 + T17:00:00，end_iso 为同一天 T17:30:00，不得按「下周」误解为 7 天后。
+- intent="replan_all"：当用户说"重新规划待完成任务"、"全部重新安排"时，返回 intent="replan_all" 即可，无需在 actions 里列举所有任务（系统会自动顺延所有 pending 任务）。
+- intent="plan" 时优先返回 desired_state；若无法稳定描述目标态，再返回 actions。
+- intent="update" vs "insert"：如果提到现有需要修改的事，是 update。提到新的、记录某事，是 insert。
+- **时间调整 vs 时长**：如果用户说"需要X时间""改半小时"，填到 `new_duration_minutes`。如果说"晚一点""推迟X小时"，填到 `delta_minutes`。若用户没给具体位移/时间点，保持字段为空，不要猜。
+- **进度追踪**：如果说"完成50%"，填 action="complete", progress_percentage=50，不要乱改内容。
+- **目标识别**：不要试图找出系统数据库里的 ID，绝大部情况把用户提到的称呼放进 `target_title_expr` 即可（如 "那个会", "研讨会"）。
 """
 
 
-def _relative_dates_ref(today: date) -> str:
-    """
-    生成「明天」「下周一」等相对日期参考（周一=0，周日=6，与 Python weekday 一致）。
-    每个日期后标注星期，便于核对；若「今天」为周日则下周三为 3 天后。
-    """
-    tomorrow = today + timedelta(days=1)
-    day_after = today + timedelta(days=2)
-    weeknames = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+def _build_nlp_context_prompt(
+    system_prompt: str,
+    today: date,
+    now_iso: str,
+    weekday: str,
+    day_tasks: Optional[list],
+    conversation_history: Optional[List[Dict[str, str]]],
+    include_history: bool,
+    include_day_tasks: bool,
+) -> str:
+    history_text = ""
+    if include_history and conversation_history and len(conversation_history) > 0:
+        recent_history = conversation_history[-10:]
+        history_lines = []
+        for msg in recent_history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                history_lines.append(f"用户：{content}")
+            elif role == "assistant":
+                history_lines.append(f"助手：{content}")
+        if history_lines:
+            history_text = f"\n【对话历史】\n" + "\n".join(history_lines) + "\n"
 
-    def next_weekday(d: date, target_w: int) -> date:
-        # target_w: Mon=0 .. Sun=6（与 Python weekday 一致）
-        days = (target_w - d.weekday() + 7) % 7
-        if days == 0:
-            days = 7
-        return d + timedelta(days=days)
-
-    next_mon = next_weekday(today, 0)
-    next_tue = next_weekday(today, 1)
-    next_wed = next_weekday(today, 2)
-    next_thu = next_weekday(today, 3)
-    next_fri = next_weekday(today, 4)
-    next_sat = next_weekday(today, 5)
-    next_sun = next_weekday(today, 6)
-
-    def _label(d: date) -> str:
-        return f"{d.isoformat()}（{weeknames[d.weekday()]}）"
+    tasks_section = ""
+    if include_day_tasks:
+        tasks_ctx_str = " (无)"
+        if day_tasks:
+            titles = []
+            for t in day_tasks:
+                if isinstance(t, dict):
+                    title = (t.get("title") or "").strip()
+                else:
+                    title = (getattr(t, "title", None) or "").strip()
+                if title:
+                    titles.append(title)
+            if titles:
+                tasks_ctx_str = ", ".join(titles)
+        tasks_section = (
+            f"【当日已有任务概览】{tasks_ctx_str}\n\n"
+            f"【补充说明】\n"
+            f"- 判断意图时，如果用户说的新任务不在上面已有概览中，是 insert。如果是已有的，是 update。\n"
+        )
 
     return (
-        f"明天={_label(tomorrow)}，后天={_label(day_after)}，"
-        f"下周一={_label(next_mon)}，下周二={_label(next_tue)}，下周三={_label(next_wed)}，"
-        f"下周四={_label(next_thu)}，下周五={_label(next_fri)}，下周六={_label(next_sat)}，下周日={_label(next_sun)}。"
+        f"【时间上下文】今天是 {today.isoformat()}，星期{weekday}。当前具体时间是 {now_iso}。\n\n"
+        f"{system_prompt}\n\n"
+        f"{history_text}"
+        f"{tasks_section}"
     )
 
 
-def _time_desc_to_iso(today: date, desc: str) -> Optional[str]:
-    """将「下午两点」「14:00」「凌晨1点」等转为今日的 ISO 开始时间。"""
-    if not desc or not desc.strip():
-        return None
-    desc = desc.strip()
-    # 明天
-    base = today
-    if "明天" in desc:
-        base = today + timedelta(days=1)
-        desc = desc.replace("明天", "").strip()
-    # 凌晨（0-5点，通常是第二天）
-    hour, minute = 0, 0
-    if "凌晨" in desc:
-        base = today + timedelta(days=1)  # 凌晨通常是第二天
-        m = re.search(r"(\d{1,2})\s*点", desc)
-        if m:
-            hour = int(m.group(1))
-            if hour > 5:  # 如果超过5点，可能是当天凌晨
-                base = today
-        else:
-            hour = 1  # 默认凌晨1点
-    elif "下午" in desc or "中午" in desc:
-        hour = 14 if "两点" in desc or "2点" in desc else (12 if "中午" in desc else 15)
-        if "两点" in desc or "2点" in desc:
-            hour = 14
-        elif "一点" in desc or "1点" in desc:
-            hour = 13
-        elif "三点" in desc or "3点" in desc:
-            hour = 15
-        elif "四点" in desc or "4点" in desc:
-            hour = 16
-    elif "上午" in desc:
-        if "九点" in desc or "9点" in desc:
-            hour = 9
-        elif "十点" in desc or "10点" in desc:
-            hour = 10
-        else:
-            hour = 9
-    elif "晚上" in desc:
-        hour = 19
-    # 直接数字 14:00
-    m = re.search(r"(\d{1,2}):(\d{2})", desc)
-    if m:
-        hour, minute = int(m.group(1)), int(m.group(2))
-        # 如果小时数小于6且没有"凌晨"关键词，可能是凌晨时间（第二天）
-        if hour < 6 and "凌晨" not in desc and "上午" not in desc:
-            base = today + timedelta(days=1)
-    else:
-        m = re.search(r"(\d{1,2})\s*点", desc)
-        if m:
-            hour = int(m.group(1))
-            # 如果小时数小于6且没有"凌晨"关键词，可能是凌晨时间（第二天）
-            if hour < 6 and "凌晨" not in desc and "上午" not in desc:
-                base = today + timedelta(days=1)
-    return f"{base.isoformat()}T{hour:02d}:{minute:02d}:00"
 
 
-def _parse_time_range_from_text(today: date, text: str) -> Optional[tuple]:
-    """
-    从「X是15到16点」「X是14点到17点」等表述解析出 (new_start_iso, new_end_iso)。
-    返回 (start_iso, end_iso) 或 None。
-    """
-    if not text or not text.strip():
-        return None
-    text = text.strip()
-    # 匹配「是 15 到 16 点」「是14点到17点」
-    m = re.search(r"是\s*(\d{1,2})\s*点?\s*到\s*(\d{1,2})\s*点", text)
-    if m:
-        h1, h2 = int(m.group(1)), int(m.group(2))
-        if 0 <= h1 <= 23 and 0 <= h2 <= 23 and h1 != h2:
-            start_iso = f"{today.isoformat()}T{h1:02d}:00:00"
-            end_iso = f"{today.isoformat()}T{h2:02d}:00:00"
-            return (start_iso, end_iso)
-    # 匹配「是 14:00 到 17:30」等
-    m = re.search(r"是\s*(\d{1,2})\s*:\s*(\d{2})\s*到\s*(\d{1,2})\s*:\s*(\d{2})", text)
-    if m:
-        h1, m1, h2, m2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-        if 0 <= h1 <= 23 and 0 <= m1 <= 59 and 0 <= h2 <= 23 and 0 <= m2 <= 59:
-            start_iso = f"{today.isoformat()}T{h1:02d}:{m1:02d}:00"
-            end_iso = f"{today.isoformat()}T{h2:02d}:{m2:02d}:00"
-            return (start_iso, end_iso)
-    return None
+
+
+
 
 
 def parse_user_command(
@@ -278,7 +165,7 @@ def parse_user_command(
     if now_dt.tzinfo:
         now_dt = now_dt.replace(tzinfo=None)  # 后续格式用 naive
     weekday = "一二三四五六日"[now_dt.weekday()]
-    from config import OPENAI_API_KEY, GEMINI_API_KEY, GEMINI_MODEL
+    from config import OPENAI_API_KEY, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_BASE_URL, GEMINI_API_TYPE
     from config import (
         AZURE_OPENAI_API_KEY,
         AZURE_OPENAI_ENDPOINT,
@@ -286,6 +173,8 @@ def parse_user_command(
         AZURE_OPENAI_API_VERSIONS,
         AZURE_OPENAI_DEPLOYMENT,
         AZURE_OPENAI_DEPLOYMENTS,
+        NLP_INCLUDE_HISTORY_IN_PROMPT,
+        NLP_INCLUDE_DAY_TASKS_IN_PROMPT,
     )
 
     def _exc_status_code(exc: Exception) -> Optional[int]:
@@ -317,6 +206,47 @@ def parse_user_command(
             or "deploymentnotfound" in msg
             or "deployment for this resource does not exist" in msg
         )
+
+    def _try_gemini_openai_compat(prompt: str) -> Optional[CommandIntent]:
+        """
+        优先支持 openai-style Gemini 兼容网关（如 https://yunwu.ai/v1）。
+        成功返回 CommandIntent；失败返回 None 继续后续 provider。
+        """
+        if (GEMINI_API_TYPE or "").lower() != "openai":
+            return None
+        if not GEMINI_API_KEY or OpenAI is None:
+            return None
+        try:
+            base_url = (GEMINI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
+            if not base_url.endswith("/v1"):
+                base_url += "/v1"
+            model_name = GEMINI_MODEL or "gemini-2.5-pro"
+            client = OpenAI(api_key=GEMINI_API_KEY, base_url=base_url)
+            log.info("gemini openai-style nlp try model=%s base_url=%s", model_name, base_url)
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("gemini openai-style nlp raw=%s", raw[:2000] + ("..." if len(raw) > 2000 else ""))
+            start = raw.find("{")
+            if start != -1:
+                end = raw.rfind("}") + 1
+                if end > start:
+                    raw = raw[start:end]
+            obj = json.loads(raw)
+            cmd = _dict_to_intent(obj, today, user_text)
+            return _maybe_fill_update_actions(cmd, today, user_text, day_tasks)
+        except Exception as e:
+            _log_http_error("gemini openai-style nlp", e)
+            log.exception("gemini openai-style nlp parse failed: %s", e)
+            return None
 
     def _try_hkust_azure(prompt: str) -> Optional[CommandIntent]:
         """Gemini 限流/不可用时，回退到 HKUST Azure OpenAI。多 api-version × 多 deployment 自动尝试。"""
@@ -412,50 +342,27 @@ def parse_user_command(
             except Exception:
                 pass
 
-    # 当日日程上下文（给 LLM 用来选 task_id）
-    # 只传最必要字段，避免 token 爆炸
-    tasks_ctx = day_tasks if isinstance(day_tasks, list) else []
-    tasks_ctx_json = ""
-    try:
-        tasks_ctx_json = json.dumps(tasks_ctx, ensure_ascii=False)
-    except Exception:
-        tasks_ctx_json = "[]"
-
-    def _with_context(system_prompt: str) -> str:
-        history_text = ""
-        if conversation_history and len(conversation_history) > 0:
-            # 只取最近 5 轮对话（10 条消息）作为上下文
-            recent_history = conversation_history[-10:]
-            history_lines = []
-            for msg in recent_history:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role == "user":
-                    history_lines.append(f"用户：{content}")
-                elif role == "assistant":
-                    history_lines.append(f"助手：{content}")
-            if history_lines:
-                history_text = f"\n【对话历史】\n" + "\n".join(history_lines) + "\n"
-        
-        return (
-            f"{system_prompt}\n\n"
-            f"{history_text}"
-            f"【当日日程上下文】这是你今天已有的任务清单（含 id）。若需要 update/delete/complete，请优先返回 target_task_id：\n"
-            f"{tasks_ctx_json}\n\n"
-            f"【补充说明】\n"
-            f"- **首先判断意图**：如果用户提到的新任务名称**不在**上述任务列表中，必须是 **insert** 意图，创建新任务。只有当用户明确提到**现有任务**的名称或ID时，才使用 update/delete/complete 意图。\n"
-            f"- **重新规划待办**：用户说「重新规划待完成的任务」「按当前时间重新安排」「获取当前系统时间重新规划安排待完成的任务」等时，必须返回 **plan** 意图，**为上述任务列表中每一条 status 为 pending 的任务各生成一个 action=plan（不能漏掉任何一条）**，并从当前时间顺延 start_iso/end_iso；不要返回 query。\n"
-            f"- 从当日任务列表中查找 target_task_id，优先匹配任务标题或时间\n"
-            f"- update 操作：必须提供 delta_minutes（时间偏移）或 new_start_iso/new_end_iso（新时间）或 duration_minutes（新时长）中的至少一个\n"
-            f"- 如果无法确定要操作的任务，返回 need_clarification=true 并提供 candidates（最多3条）\n"
-            f"- 如果用户对之前的操作不满意，结合对话历史中的预览计划理解要修改的任务\n"
-            f"- 根据用户表达的自然语言，合理推断时间调整方式（推迟 vs 调整时长 vs 指定新时间）\n"
+    def _with_context(system_prompt: str, today: date, now_iso: str, weekday: str) -> str:
+        return _build_nlp_context_prompt(
+            system_prompt=system_prompt,
+            today=today,
+            now_iso=now_iso,
+            weekday=weekday,
+            day_tasks=day_tasks,
+            conversation_history=conversation_history,
+            include_history=NLP_INCLUDE_HISTORY_IN_PROMPT,
+            include_day_tasks=NLP_INCLUDE_DAY_TASKS_IN_PROMPT,
         )
 
-    # 优先 HKUST Azure OpenAI
+    # 最高优先：Gemini OpenAI 兼容网关（如 yunwu.ai/v1）
+    gemini_openai_res = _try_gemini_openai_compat(_with_context(_SCHEMA, today, now_iso, weekday))
+    if gemini_openai_res is not None:
+        log.info("使用 Gemini OpenAI 兼容网关进行解析")
+        return gemini_openai_res
+
+    # 次优先 HKUST Azure OpenAI
     if AZURE_OPENAI_API_KEY and AzureOpenAI is not None:
-        prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
-        azure_res = _try_hkust_azure(_with_context(prompt))
+        azure_res = _try_hkust_azure(_with_context(_SCHEMA, today, now_iso, weekday))
         if azure_res is not None:
             log.info("使用 HKUST Azure OpenAI 进行解析")
             return azure_res
@@ -463,8 +370,7 @@ def parse_user_command(
     # 其次 Gemini（适配你当前 AIza... key）
     if GEMINI_API_KEY and httpx is not None:
         try:
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
-            sys_prompt = _with_context(prompt)
+            sys_prompt = _with_context(_SCHEMA, today, now_iso, weekday)
             full = f"{sys_prompt}\n用户输入：{user_text}"
             # Google AI Studio / Gemini Developer API：优先 v1beta
             model_name = GEMINI_MODEL or "gemini-1.5-flash"
@@ -563,8 +469,7 @@ def parse_user_command(
             # Gemini 失败时：优先回退 HKUST Azure 进行解析
             _log_http_error("gemini nlp", e)
             log.exception("gemini nlp parse failed: %s", e)
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
-            azure_res = _try_hkust_azure(_with_context(prompt))
+            azure_res = _try_hkust_azure(_with_context(_SCHEMA, today, now_iso, weekday))
             if azure_res is not None:
                 log.info("Gemini 失败，成功回退到 Azure OpenAI")
                 return azure_res
@@ -574,8 +479,7 @@ def parse_user_command(
     if OPENAI_API_KEY and OpenAI is not None:
         try:
             client = OpenAI(api_key=OPENAI_API_KEY)
-            prompt = _SCHEMA.format(today=today.isoformat(), now_iso=now_iso, weekday=weekday, relative_dates=_relative_dates_ref(today))
-            sys_prompt = _with_context(prompt)
+            sys_prompt = _with_context(_SCHEMA, today, now_iso, weekday)
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -602,41 +506,64 @@ def parse_user_command(
         except Exception as e:
             log.exception("openai nlp parse failed: %s", e)
 
+    log.warning("All LLM providers unavailable or failed, falling back to rule-based parsing")
     cmd = _rule_fallback(user_text, today)
     return _maybe_fill_update_actions(cmd, today, user_text, day_tasks)
 
 
 def _dict_to_intent(obj: dict, today: date, user_text: str) -> CommandIntent:
     intent = (obj.get("intent") or "query").lower()
-    if intent not in ("insert", "update", "delete", "query", "plan"):
+    if intent not in ("insert", "update", "delete", "query", "plan", "replan_all"):
         intent = "query"
 
     target_start_iso = None
     if obj.get("target_time_desc"):
-        target_start_iso = _time_desc_to_iso(today, obj["target_time_desc"])
+        _parsed = _parse_natural_time(obj["target_time_desc"], base_date=today)
+        target_start_iso = _parsed.strftime("%Y-%m-%dT%H:%M:%S") if _parsed else None
 
     delta = obj.get("delta_minutes")
     if delta is not None and isinstance(delta, (int, float)):
         delta = int(delta)
 
     # --- 兜底修正：LLM 有时把 update 的目标任务放在 title 而不是 target_title ---
-    # 同时，用户说“推迟/延后/延期”但未给具体分钟/时间点时，给一个合理默认值，避免 update 成为空操作。
     text = (user_text or "").strip()
-    text_lower = text.lower()
 
-    def _default_delta_minutes_from_text(t: str) -> int:
-        # 与规则兜底保持一致：默认 60min；含“半”则 30min；若明确写了数字小时/分钟则从文本提取
-        if "半" in t:
-            base = 30
-        else:
-            base = 60
-        m = re.search(r"(\d+)\s*小时", t)
+    def _parse_time_range_from_text(base_date: date, text: str):
+        """从文本中解析 '从X到Y' 的时间范围，返回 (start_iso, end_iso) 或 None。"""
+        # 匹配 "X点到Y点"、"从X到Y" 等模式
+        m = re.search(r'(?:从)?(\d{1,2})[点:：时](?:(\d{1,2})分?)?\s*(?:到|至|-|—|~)\s*(\d{1,2})[点:：时](?:(\d{1,2})分?)?', text)
         if m:
-            return 60 * int(m.group(1))
-        m = re.search(r"(\d+)\s*分钟", t)
-        if m:
-            return int(m.group(1))
-        return base
+            sh, sm = int(m.group(1)), int(m.group(2) or 0)
+            eh, em = int(m.group(3)), int(m.group(4) or 0)
+            from datetime import datetime as _dt
+            try:
+                s = _dt(base_date.year, base_date.month, base_date.day, sh, sm)
+                e = _dt(base_date.year, base_date.month, base_date.day, eh, em)
+                return s.strftime("%Y-%m-%dT%H:%M:%S"), e.strftime("%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                return None
+        # 匹配 "上午/下午/晚上X点到Y点"
+        m2 = re.search(r'(上午|下午|晚上|凌晨|早上|中午)\s*(\d{1,2})[点:：时]?\s*(?:到|至|-|—|~)\s*(?:(上午|下午|晚上|凌晨|早上|中午)\s*)?(\d{1,2})[点:：时]?', text)
+        if m2:
+            def _adj(period, h):
+                if period in ("下午", "晚上") and h < 12:
+                    return h + 12
+                if period == "凌晨" and h == 12:
+                    return 0
+                return h
+            p1, h1 = m2.group(1), int(m2.group(2))
+            p2 = m2.group(3) or m2.group(1)
+            h2 = int(m2.group(4))
+            sh = _adj(p1, h1)
+            eh = _adj(p2, h2)
+            from datetime import datetime as _dt
+            try:
+                s = _dt(base_date.year, base_date.month, base_date.day, sh, 0)
+                e = _dt(base_date.year, base_date.month, base_date.day, eh, 0)
+                return s.strftime("%Y-%m-%dT%H:%M:%S"), e.strftime("%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                return None
+        return None
 
     def _normalize_actions(actions: Any) -> Any:
         if not isinstance(actions, list):
@@ -652,12 +579,7 @@ def _dict_to_intent(obj: dict, today: date, user_text: str) -> CommandIntent:
                 if not a.get("target_title") and isinstance(a.get("title"), str) and a.get("title").strip():
                     a = dict(a)
                     a["target_title"] = a["title"].strip()
-            # 用户表达“推迟/延后/延期”但缺少位移/时间点时：补 delta_minutes
             if act == "update":
-                has_shift = any(a.get(k) is not None for k in ("delta_minutes", "new_start_iso", "new_end_iso"))
-                if (not has_shift) and ("推迟" in text or "延后" in text or "延期" in text or "延迟" in text):
-                    a = dict(a)
-                    a["delta_minutes"] = _default_delta_minutes_from_text(text)
                 # 兜底：用户说「X是A到B点」时，从文本解析起止时刻，覆盖错误使用的 delta_minutes
                 if not (a.get("new_start_iso") and a.get("new_end_iso")):
                     parsed = _parse_time_range_from_text(today, text)
@@ -666,16 +588,48 @@ def _dict_to_intent(obj: dict, today: date, user_text: str) -> CommandIntent:
                         a["new_start_iso"], a["new_end_iso"] = parsed
                         if "delta_minutes" in a:
                             del a["delta_minutes"]
+            pre = a.get("preconditions")
+            if pre is not None and not isinstance(pre, dict):
+                a = dict(a)
+                a.pop("preconditions", None)
+            expected = a.get("expected_delta")
+            if expected is not None and not isinstance(expected, dict):
+                a = dict(a)
+                a.pop("expected_delta", None)
             out.append(a)
         return out
 
+    def _normalize_desired_state(desired: Any) -> Optional[List[Dict[str, Any]]]:
+        if not isinstance(desired, list):
+            return None
+        out: List[Dict[str, Any]] = []
+        for item in desired:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            d: Dict[str, Any] = {"title": title.strip()}
+            if item.get("id") is not None:
+                d["id"] = str(item.get("id"))
+            for key in ("start_iso", "end_iso", "priority", "status", "memo"):
+                if item.get(key) is not None:
+                    d[key] = item.get(key)
+            if isinstance(item.get("is_fixed"), bool):
+                d["is_fixed"] = item.get("is_fixed")
+            out.append(d)
+        return out or None
+
     actions = _normalize_actions(obj.get("actions"))
+    desired_state = _normalize_desired_state(obj.get("desired_state"))
     
     # 调试日志：检查actions解析结果
     log.info("_dict_to_intent: intent=%s, actions类型=%s, actions长度=%s", 
              intent,
              type(actions).__name__ if actions else None,
              len(actions) if isinstance(actions, list) else 0)
+    if desired_state:
+        log.info("_dict_to_intent: desired_state长度=%d", len(desired_state))
     if isinstance(actions, list) and len(actions) > 0:
         log.debug("actions内容: %s", [a.get("action") if isinstance(a, dict) else str(a) for a in actions[:3]])
 
@@ -695,8 +649,10 @@ def _dict_to_intent(obj: dict, today: date, user_text: str) -> CommandIntent:
         reasoning=(obj.get("reasoning") or "").strip() or None,
         planning_reason=obj.get("planning_reason"),
         actions=actions,
+        desired_state=desired_state,
         need_clarification=bool(obj.get("need_clarification")) if obj.get("need_clarification") is not None else None,
         candidates=obj.get("candidates") if isinstance(obj.get("candidates"), list) else None,
+        parse_source="llm",
     )
 
 
@@ -788,21 +744,33 @@ def _rule_fallback(user_text: str, today: date) -> CommandIntent:
         m = re.search(r"(\d{1,2}:\d{2}|\d{1,2}\s*点)", text)
         return m.group(1) if m else ""
 
-    # --- 更新/推迟：在 LLM 不可用时，至少能按标题关键词更新 ---
-    if "推迟" in t_lower or "延后" in t_lower or "延期" in t_lower or "延迟" in t_lower:
-        delta = 60
+    # --- 更新/推迟/修改/改到：在 LLM 不可用时，至少能按标题关键词更新 ---
+    update_keywords = ("推迟", "延后", "延期", "延迟", "改", "调整", "修改", "换到", "改到", "移到", "挪到", "提前")
+    if any(kw in t_lower for kw in update_keywords):
+        delta = None
         if "半" in t_lower:
-            delta = 30
+            delta = -30 if "提前" in t_lower else 30
+        if "提前" in t_lower:
+            delta = -60 if delta is None else delta
         m = re.search(r"(\d+)\s*小时", raw)
         if m:
-            delta = 60 * int(m.group(1))
+            base_d = 60 * int(m.group(1))
+            delta = -base_d if "提前" in t_lower else base_d
         m = re.search(r"(\d+)\s*分钟", raw)
         if m:
-            delta = int(m.group(1))
+            base_d = int(m.group(1))
+            delta = -base_d if "提前" in t_lower else base_d
 
         target_title = _extract_target_title_for_update(raw)
+        # 兜底：如果没提取到标题，尝试按「把X改到」或「X改成」的模式提取
+        if not target_title:
+            m_title = re.search(r'(?:把|将)?\s*(.+?)\s*(?:改到|改成|换到|移到|挪到|调整到|修改到|提前到)', raw)
+            if m_title:
+                target_title = m_title.group(1).strip()
+                target_title = re.sub(r'^(把|将)\s*', '', target_title).strip()
         time_desc = _extract_time_desc(raw)
-        new_start_iso = _time_desc_to_iso(today, time_desc) if time_desc else None
+        _parsed_t = _parse_natural_time(time_desc, base_date=today) if time_desc else None
+        new_start_iso = _parsed_t.strftime("%Y-%m-%dT%H:%M:%S") if _parsed_t else None
 
         actions = []
         a = {"action": "update"}
@@ -810,24 +778,24 @@ def _rule_fallback(user_text: str, today: date) -> CommandIntent:
             a["target_title"] = target_title
         if new_start_iso:
             a["new_start_iso"] = new_start_iso
-        else:
+        elif delta is not None:
             a["delta_minutes"] = delta
         actions.append(a)
-        return CommandIntent(intent="update", actions=actions, reply_text="已理解：将尝试更新目标任务时间。")
+        return CommandIntent(intent="update", actions=actions, reply_text="已理解：将尝试更新目标任务时间。", parse_source="rule_fallback")
 
     # --- 删除/取消：极简按标题关键词 ---
     if "删除" in t_lower or "取消" in t_lower:
         cand = re.sub(r"^(删除|取消)\s*", "", raw).strip()
         actions = [{"action": "delete", "target_title": cand}] if cand else [{"action": "delete"}]
-        return CommandIntent(intent="delete", actions=actions, reply_text="已理解：将尝试删除目标任务。")
+        return CommandIntent(intent="delete", actions=actions, reply_text="已理解：将尝试删除目标任务。", parse_source="rule_fallback")
 
     # --- 完成：按标题关键词 ---
     if "完成" in t_lower or "搞定" in t_lower or "做完" in t_lower:
         cand = re.sub(r"^(完成|搞定|做完)\s*", "", raw).strip()
         actions = [{"action": "complete", "target_title": cand}] if cand else [{"action": "complete"}]
-        return CommandIntent(intent="query", actions=actions, reply_text="已理解：将尝试把目标任务标记为完成。")
+        return CommandIntent(intent="query", actions=actions, reply_text="已理解：将尝试把目标任务标记为完成。", parse_source="rule_fallback")
 
-    if "添加" in t_lower or "新增" in t_lower or "安排" in t_lower or "记录" in t_lower or "加入" in t_lower:
-        return CommandIntent(intent="insert", reply_text="已理解：将新增一条任务。")
+    if any(kw in t_lower for kw in ("添加", "新增", "安排", "记录", "加入", "加个", "加一个", "开")):
+        return CommandIntent(intent="insert", reply_text="已理解：将新增一条任务。", parse_source="rule_fallback")
 
-    return CommandIntent(intent="query", reply_text="已收到；若需排程请配置 LLM（Gemini/OpenAI）或用“删除/完成/推迟+任务名”指令。")
+    return CommandIntent(intent="query", reply_text='已收到；若需排程请配置 LLM（Gemini/OpenAI）或用"删除/完成/推迟+任务名"指令。', parse_source="rule_fallback")

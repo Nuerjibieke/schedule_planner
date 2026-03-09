@@ -7,6 +7,7 @@ from __future__ import annotations
 import streamlit as st
 from datetime import date, datetime, timedelta, timezone
 import streamlit.components.v1 as components
+from typing import List
 
 from db.client import init_supabase
 from config import SUPABASE_URL, SUPABASE_KEY, WORKDAY_START_HOUR, WORKDAY_END_HOUR, REMINDER_POLL_INTERVAL
@@ -25,6 +26,7 @@ from service.app_service import (
     start_task_timer,
     pause_task_timer,
     end_task_timer,
+    _utc_iso_to_local_display,
 )
 from report import get_weekly_report_text, get_monthly_report_text, run_daily_archive
 from utils.logging_setup import setup_logging, get_recent_logs
@@ -398,8 +400,8 @@ if "pending_plan" not in st.session_state:
     st.session_state.pending_plan = None
 if "llm_reasoning" not in st.session_state:
     st.session_state.llm_reasoning = ""
-if "conversation_history" not in st.session_state:
-    st.session_state.conversation_history = []
+if "last_user_prompt" not in st.session_state:
+    st.session_state.last_user_prompt = ""
 if "auto_checked_overdue" not in st.session_state:
     st.session_state.auto_checked_overdue = False
 if "show_logs" not in st.session_state:
@@ -415,6 +417,102 @@ def _schedule_reminder_fragment():
 
 
 _schedule_reminder_fragment()
+
+
+def _truncate_text(text: str, max_len: int = 120) -> str:
+    s = (text or "").strip()
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1].rstrip() + "…"
+
+
+def _infer_pipeline_source(reasoning: str) -> str:
+    r = (reasoning or "").strip()
+    if r.startswith("[AGENT+CRITIC]"):
+        return "Agent+Critic"
+    if r.startswith("[AGENT]"):
+        return "Agent"
+    if r.startswith("[LEGACY]"):
+        return "Legacy"
+    return "System"
+
+
+def _compact_feedback_lines(raw_feedback: str, max_items: int = 4) -> List[str]:
+    text = (raw_feedback or "").strip()
+    if not text:
+        return []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    out: List[str] = []
+
+    header = lines[0] if lines else ""
+    if header:
+        out.append(_truncate_text(header, 80))
+
+    stats = next((ln for ln in lines if ln.startswith("统计：")), "")
+    if stats:
+        out.append(stats)
+
+    bullets = [ln for ln in lines if ln.startswith("- ")]
+    if bullets:
+        out.extend([_truncate_text(x, 80) for x in bullets[:max_items]])
+
+    verify_idx = -1
+    for i, ln in enumerate(lines):
+        if "【目标态校验】" in ln:
+            verify_idx = i
+            break
+    if verify_idx >= 0:
+        verify_line = lines[verify_idx]
+        out.append(_truncate_text(verify_line, 80))
+        if verify_idx + 1 < len(lines):
+            out.append(_truncate_text(lines[verify_idx + 1], 80))
+
+    if not out:
+        out = [_truncate_text(ln, 80) for ln in lines[:5]]
+    return out
+
+
+def _build_compact_flow_text(
+    raw_feedback: str,
+    reasoning: str,
+    has_pending_plan: bool,
+) -> str:
+    raw = (raw_feedback or "").strip()
+    source = _infer_pipeline_source(reasoning)
+
+    if any(k in raw for k in ("当前动作校验失败", "计划第", "校验失败")):
+        validate = "失败"
+    elif has_pending_plan or "预览" in raw:
+        validate = "通过(预览)"
+    else:
+        validate = "通过"
+
+    if any(k in raw for k in ("执行失败", "后验失败", "已回滚")):
+        execute = "失败/回滚"
+    elif has_pending_plan or "请确认后再执行" in raw or "预览" in raw:
+        execute = "待确认"
+    else:
+        execute = "已执行"
+
+    if "【目标态校验】" in raw:
+        verify = "通过" if "✅" in raw else "偏差"
+    elif "后验失败" in raw or "执行后校验失败" in raw:
+        verify = "失败"
+    else:
+        verify = "跳过"
+
+    return f"解析[{source}] -> 校验[{validate}] -> 执行[{execute}] -> 验收[{verify}]"
+
+
+def _build_compact_feedback_view(
+    raw_feedback: str,
+    reasoning: str,
+    has_pending_plan: bool,
+) -> str:
+    flow = _build_compact_flow_text(raw_feedback, reasoning, has_pending_plan)
+    lines = _compact_feedback_lines(raw_feedback)
+    detail = "\n".join(lines) if lines else "（暂无反馈）"
+    return f"【处理流程】\n{flow}\n\n【结果摘要】\n{detail}"
 
 # 全局样式美化：现代化设计风格
 st.markdown(
@@ -2623,16 +2721,41 @@ with st.container(border=True):
           <h2 style="margin: 0; color: #6b6a65; font-weight: 700;">💬 对话与反馈</h2>
         </div>
         """, unsafe_allow_html=True)
+        has_pending = st.session_state.get("pending_plan") is not None
+        compact_flow = _build_compact_flow_text(
+            st.session_state.last_feedback or "",
+            st.session_state.llm_reasoning or "",
+            has_pending,
+        )
+        compact_feedback = _build_compact_feedback_view(
+            st.session_state.last_feedback or "",
+            st.session_state.llm_reasoning or "",
+            has_pending,
+        )
+        dialog_text = ""
+        if (st.session_state.get("last_user_prompt") or "").strip():
+            dialog_text = f"你：{_truncate_text(st.session_state.last_user_prompt, 100)}\n系统：{compact_flow}"
+        else:
+            dialog_text = f"系统：{compact_flow}"
+
+        st.text_area(
+            "对话摘要",
+            value=dialog_text,
+            height=72,
+            disabled=True,
+            label_visibility="collapsed",
+            help="简化后的对话流程"
+        )
         st.text_area(
             "反馈",
-            value=st.session_state.last_feedback or "",
+            value=compact_feedback,
             height=180,
             disabled=True,
             label_visibility="collapsed",
-            help="系统反馈信息将显示在这里"
+            help="系统反馈信息（精简版）"
         )
         if st.session_state.get("llm_reasoning"):
-            with st.expander("🧠 LLM 思考过程", expanded=True):
+            with st.expander("🧠 LLM 思考过程", expanded=False):
                 st.markdown(st.session_state.llm_reasoning)
         if st.session_state.get("overflow_warning"):
             st.warning(st.session_state.overflow_warning)
@@ -2640,39 +2763,18 @@ with st.container(border=True):
         prompt = st.chat_input("💡 输入指令，如：把下午两点的会推迟一小时")
         if prompt:
             try:
-                # 保存用户输入到对话历史
-                conversation_history = st.session_state.get("conversation_history", [])
-                reply, warn, pending, reasoning = handle_user_command(prompt, conversation_history)
-                
-                # 保存对话历史（用户输入 + 系统回复）
-                st.session_state.conversation_history.append({
-                    "role": "user",
-                    "content": prompt
-                })
-                st.session_state.conversation_history.append({
-                    "role": "assistant", 
-                    "content": reply
-                })
-                # 只保留最近 10 轮对话（20 条消息）
-                if len(st.session_state.conversation_history) > 20:
-                    st.session_state.conversation_history = st.session_state.conversation_history[-20:]
-                
+                # 无记忆模式：每轮仅传当前用户输入，不向服务层传历史消息
+                reply, warn, pending, reasoning = handle_user_command(prompt, None)
                 st.session_state.last_feedback = reply
                 st.session_state.pending_plan = pending
                 st.session_state.llm_reasoning = reasoning or ""
+                st.session_state.last_user_prompt = prompt
                 if warn:
                     st.session_state.overflow_warning = warn
             except Exception as e:
                 error_msg = f"执行失败：{e}"
                 st.session_state.last_feedback = error_msg
-                st.session_state.conversation_history.append({
-                    "role": "user",
-                    "content": prompt
-                })
-                st.session_state.conversation_history.append({
-                    "role": "assistant",
-                    "content": error_msg
-                })
+                st.session_state.last_user_prompt = prompt
             st.rerun()
 
         # ---- 需要确认的预览计划 ----
@@ -2690,14 +2792,14 @@ with st.container(border=True):
                 new_end = update.get("new_end", "")
                 title = update.get("title", "")
                 
-                old_start_str = old_start[11:16] if len(old_start) >= 16 else old_start
-                old_end_str = old_end[11:16] if len(old_end) >= 16 else old_end
-                new_start_str = new_start[11:16] if len(new_start) >= 16 else new_start
-                new_end_str = new_end[11:16] if len(new_end) >= 16 else new_end
+                _, old_start_local = _utc_iso_to_local_display(old_start)
+                _, old_end_local = _utc_iso_to_local_display(old_end)
+                _, new_start_local = _utc_iso_to_local_display(new_start)
+                _, new_end_local = _utc_iso_to_local_display(new_end)
                 
                 st.markdown(f"""
                 **{title}**  
-                🕐 {old_start_str}–{old_end_str} → 🕐 {new_start_str}–{new_end_str}
+                🕐 {old_start_local}–{old_end_local} → 🕐 {new_start_local}–{new_end_local}
                 """)
             
             if plan.overflow_warning:
@@ -2711,24 +2813,18 @@ with st.container(border=True):
                         reply, warn = apply_pending_plan(plan)
                         st.session_state.last_feedback = reply
                         st.session_state.pending_plan = None
-                        # 更新对话历史
-                        st.session_state.conversation_history.append({
-                            "role": "assistant",
-                            "content": reply
-                        })
+                        st.session_state.last_user_prompt = "确认执行预览计划"
                         if warn:
                             st.session_state.overflow_warning = warn
                     except Exception as e:
                         st.session_state.last_feedback = f"执行失败：{e}"
+                        st.session_state.last_user_prompt = "确认执行预览计划"
                     st.rerun()
             with c2:
                 if st.button("❌ 取消", use_container_width=True):
                     st.session_state.pending_plan = None
                     st.session_state.last_feedback = "已取消本次调整。您可以在上方输入框继续输入新的指令，我会根据您的反馈重新调整计划。"
-                    st.session_state.conversation_history.append({
-                        "role": "assistant",
-                        "content": "已取消本次调整。您可以继续告诉我您的需求，我会重新为您调整计划。"
-                    })
+                    st.session_state.last_user_prompt = "取消预览计划"
                     st.rerun()
 
         # ---- 系统日志回溯 ----
