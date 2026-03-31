@@ -41,3 +41,14 @@ tests/
 example.md
 Optimization_Plan.md
 multi_agent_and_tools_plan.md
+
+# Legacy and Documentation (Agentd method focus)
+ai/nlp.py
+architecture/
+research question/
+Codebase_Summary.md
+report.py
+docs/
+tests/
+__pycache__/
+*.pyc
