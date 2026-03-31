@@ -22,7 +22,9 @@ import os
 log = logging.getLogger("ai.agent")
 
 # 日志目录
-AGENT_LOG_DIR = "/Users/nujibieke/Documents/Agent_DB/schedule_planner/log"
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AGENT_LOG_DIR = os.path.join(_PROJECT_ROOT, "log")
+
 _LAST_AGENT_META: Dict[str, Any] = {
     "status": "idle",
     "provider": "",

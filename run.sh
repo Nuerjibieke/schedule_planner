@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # 1. 自动进入项目目录
-PROJECT_DIR="/Users/nujibieke/Documents/Agent_DB/schedule_planner"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
+
 
 # 2. 自动激活虚拟环境
 VENV_PATH="/Users/nujibieke/Documents/codex/ai_schedule/.venv/bin/activate"
