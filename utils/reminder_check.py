@@ -96,7 +96,7 @@ def run_reminder_check() -> int:
             continue
         if _already_sent(today, str(t.id)):
             continue
-        if notify("日程提醒", f"该开始：{t.title}"):
+        if notify("Schedule Reminder", f"Starting now: {t.title}"):
             _mark_sent(today, str(t.id))
             sent += 1
     return sent

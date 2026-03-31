@@ -32,7 +32,7 @@ def notify(title: str, body: str = "") -> bool:
         return False
 
     try:
-        t = _escape_applescript(title or "提醒")
+        t = _escape_applescript(title or "Reminder")
         b = _escape_applescript(body)
         script = f'display notification "{b}" with title "{t}"'
         subprocess.run(

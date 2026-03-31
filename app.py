@@ -7,6 +7,7 @@ from __future__ import annotations
 import streamlit as st
 from datetime import date, datetime, timedelta, timezone
 import streamlit.components.v1 as components
+import re
 from typing import List
 
 from db.client import init_supabase
@@ -46,7 +47,7 @@ if "progress_update" in st.query_params:
             _ok, _msg = update_task_progress(str(_tid).strip(), _p)
             st.session_state.last_feedback = _msg
         except Exception as e:
-            st.session_state.last_feedback = f"更新进度失败：{e}"
+            st.session_state.last_feedback = f"Failed to update progress: {e}"
     st.query_params.clear()
     st.rerun()
 
@@ -66,13 +67,13 @@ if "timer_action" in st.query_params:
                 if _ok:
                     st.session_state.current_executing_task_id = None
             else:
-                _ok, _msg = False, "未知操作"
+                _ok, _msg = False, "Unknown action"
             if _ok:
                 st.session_state.last_feedback = _msg
             else:
-                st.session_state.last_feedback = f"操作失败：{_msg}"
+                st.session_state.last_feedback = f"Action failed: {_msg}"
         except Exception as e:
-            st.session_state.last_feedback = f"操作失败：{e}"
+            st.session_state.last_feedback = f"Action failed: {e}"
         st.query_params.clear()
         st.rerun()
 
@@ -181,12 +182,12 @@ def render_activity_matrix(year_days: int = 365) -> None:
     def fmt_tip(d: date) -> str:
         mins = daily.get(d.isoformat(), 0)
         if mins <= 0:
-            return f"{d.isoformat()}：0 分钟"
+            return f"{d.isoformat()}: 0 min"
         h = mins // 60
         m = mins % 60
         if h > 0:
-            return f"{d.isoformat()}：{h} 小时 {m} 分钟"
-        return f"{d.isoformat()}：{m} 分钟"
+            return f"{d.isoformat()}: {h}h {m}m"
+        return f"{d.isoformat()}: {m}m"
 
     start_key = start_d.isoformat()
     end_key = end_d.isoformat()
@@ -226,8 +227,8 @@ def render_activity_matrix(year_days: int = 365) -> None:
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04), 0 1px 4px rgba(0, 0, 0, 0.02);
       ">
         <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 6px;">
-          <div style="font-size: 12px; color:#7a7872; font-weight: 700;">📈 活跃度</div>
-          <div style="font-size: 11px; color:#94a3b8; font-weight: 600;">今年 1月～12月</div>
+          <div style="font-size: 12px; color:#7a7872; font-weight: 700;">📈 Activity</div>
+          <div style="font-size: 11px; color:#94a3b8; font-weight: 600;">Jan-Dec this year</div>
         </div>
 
         <style>
@@ -377,7 +378,7 @@ def render_activity_matrix(year_days: int = 365) -> None:
 if SUPABASE_URL and SUPABASE_KEY:
     init_supabase(SUPABASE_URL, SUPABASE_KEY)
 
-st.set_page_config(page_title="智能排程", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Schedule Planner", layout="wide", initial_sidebar_state="collapsed")
 
 # 会话状态初始化（必须在所有使用之前）
 if "last_feedback" not in st.session_state:
@@ -426,6 +427,85 @@ def _truncate_text(text: str, max_len: int = 120) -> str:
     return s[: max_len - 1].rstrip() + "…"
 
 
+def _translate_feedback_text(text: str) -> str:
+    out = str(text or "")
+    if not out:
+        return out
+
+    regex_replacements = [
+        (r"统计：新增 (\d+)，修改 (\d+)，完成 (\d+)，删除 (\d+)。", r"Summary: added \1, updated \2, completed \3, deleted \4."),
+        (r"已自动延期 (\d+) 个逾期未完成任务到今天：", r"Automatically rescheduled \1 overdue incomplete task(s) to today:"),
+        (r"已恢复 (\d+) 条任务的排程。", r"Restored schedules for \1 task(s)."),
+        (r"周报已生成（从缓存加载，见下方「周报」栏目）。", r"Weekly report generated (loaded from cache; see the Weekly Report section below)."),
+        (r"周报已生成（见下方「周报」栏目）。", r"Weekly report generated (see the Weekly Report section below)."),
+        (r"月报已生成（从缓存加载，见下方「月报」栏目）。", r"Monthly report generated (loaded from cache; see the Monthly Report section below)."),
+        (r"月报已生成（见下方「月报」栏目）。", r"Monthly report generated (see the Monthly Report section below)."),
+        (r"今日日报已归档（见下方「日报」栏目）。", r"Today's daily report has been archived (see the Daily Report section below)."),
+        (r"任务进度已为(\d+)%", r"Task progress is already \1%"),
+        (r"任务进度已更新为(\d+)%，已自动标记为完成", r"Task progress updated to \1% and automatically marked as done"),
+        (r"任务进度已更新为(\d+)%", r"Task progress updated to \1%"),
+        (r"已开始计时：", r"Started timer: "),
+        (r"已暂停计时，累计工作(\d+)分钟，进度(\d+)%，任务已完成", r"Timer paused. Worked \1 min total, progress \2%, task marked as done"),
+        (r"已暂停计时，累计工作(\d+)分钟，进度(\d+)%", r"Timer paused. Worked \1 min total, progress \2%"),
+        (r"计时结束，累计工作(\d+)分钟，进度(\d+)%，任务已完成", r"Timer ended. Worked \1 min total, progress \2%, task marked as done"),
+        (r"计时结束，累计工作(\d+)分钟，进度(\d+)%", r"Timer ended. Worked \1 min total, progress \2%"),
+        (r"已创建长周期任务：", r"Long-horizon task created: "),
+        (r"已删除长周期任务：", r"Long-horizon task deleted: "),
+        (r"- (.+?)：延期到 (.+)", r"- \1: rescheduled to \2"),
+    ]
+    for pattern, repl in regex_replacements:
+        out = re.sub(pattern, repl, out)
+
+    replacements = [
+        ("【规划思路】", "[Planning Rationale]"),
+        ("【执行建议】", "[Execution Notes]"),
+        ("【目标态校验】", "[Goal-State Verification]"),
+        ("我已根据您的需求规划了以下方案（预览），请确认：", "I prepared the following plan (preview). Please confirm:"),
+        ("发现时间冲突，建议做以下调整（预览）：", "Time conflict detected. Suggested adjustments (preview):"),
+        ("已理解并执行以下操作：", "Completed the following actions:"),
+        ("已收到。", "Received."),
+        ("已取消本次调整。您可以在上方输入框继续输入新的指令，我会根据您的反馈重新调整计划。", "This adjustment was cancelled. You can enter a new instruction above and I will revise the plan based on your feedback."),
+        ("请确认后再执行", "Please confirm before execution"),
+        ("预览", "Preview"),
+        ("执行失败：", "Execution failed: "),
+        ("当前动作校验失败：", "Current action validation failed: "),
+        ("执行后校验失败，已回滚 ", "Post-execution verification failed. Rolled back "),
+        ("目标态校验未通过，已回滚 ", "Goal-state verification failed. Rolled back "),
+        ("检测到短时间重复请求，已忽略本次重复写入。", "Detected a duplicate request in a short time window. Ignored this write."),
+        ("没有需要延期的任务。", "No overdue tasks needed rescheduling."),
+        ("没有可撤销的操作。", "Nothing to undo."),
+        ("任务不存在", "Task not found"),
+        ("任务已标记为完成", "Task marked as done"),
+        ("任务已标记为待办", "Task marked as pending"),
+        ("任务已删除", "Task deleted"),
+        ("已完成的任务无法开始计时", "Completed tasks cannot start a timer"),
+        ("未找到开始时间，请先开始计时", "Start time not found. Start the timer first"),
+        ("开始时间格式错误", "Invalid timer start format"),
+        ("长周期任务已更新。", "Long-horizon task updated."),
+        ("归档失败：", "Archive failed: "),
+        ("检查失败：", "Check failed: "),
+        ("周报生成失败：", "Weekly report generation failed: "),
+        ("月报生成失败：", "Monthly report generation failed: "),
+        ("创建失败：", "Create failed: "),
+        ("删除失败：", "Delete failed: "),
+        ("保存失败：", "Save failed: "),
+        ("更新失败：", "Update failed: "),
+        ("添加失败: ", "Add failed: "),
+        ("加载提醒事项失败: ", "Failed to load reminders: "),
+        ("加载长周期任务失败：", "Failed to load long-horizon tasks: "),
+        ("- 新增：", "- Added: "),
+        ("- 修改：", "- Updated: "),
+        ("- 完成：", "- Completed: "),
+        ("- 删除：", "- Deleted: "),
+        ("- 更新进度：", "- Progress updated: "),
+        ("- 跳过重复写入：", "- Skipped duplicate write: "),
+        ("📌 调整原因：", "📌 Rationale: "),
+    ]
+    for src, dst in replacements:
+        out = out.replace(src, dst)
+    return out
+
+
 def _infer_pipeline_source(reasoning: str) -> str:
     r = (reasoning or "").strip()
     if r.startswith("[AGENT+CRITIC]"):
@@ -446,29 +526,29 @@ def _compact_feedback_lines(raw_feedback: str, max_items: int = 4) -> List[str]:
 
     header = lines[0] if lines else ""
     if header:
-        out.append(_truncate_text(header, 80))
+        out.append(_truncate_text(_translate_feedback_text(header), 80))
 
-    stats = next((ln for ln in lines if ln.startswith("统计：")), "")
+    stats = next((ln for ln in lines if ln.startswith(("统计：", "Summary:"))), "")
     if stats:
-        out.append(stats)
+        out.append(_translate_feedback_text(stats))
 
     bullets = [ln for ln in lines if ln.startswith("- ")]
     if bullets:
-        out.extend([_truncate_text(x, 80) for x in bullets[:max_items]])
+        out.extend([_truncate_text(_translate_feedback_text(x), 80) for x in bullets[:max_items]])
 
     verify_idx = -1
     for i, ln in enumerate(lines):
-        if "【目标态校验】" in ln:
+        if "【目标态校验】" in ln or "[Goal-State Verification]" in ln:
             verify_idx = i
             break
     if verify_idx >= 0:
         verify_line = lines[verify_idx]
-        out.append(_truncate_text(verify_line, 80))
+        out.append(_truncate_text(_translate_feedback_text(verify_line), 80))
         if verify_idx + 1 < len(lines):
-            out.append(_truncate_text(lines[verify_idx + 1], 80))
+            out.append(_truncate_text(_translate_feedback_text(lines[verify_idx + 1]), 80))
 
     if not out:
-        out = [_truncate_text(ln, 80) for ln in lines[:5]]
+        out = [_truncate_text(_translate_feedback_text(ln), 80) for ln in lines[:5]]
     return out
 
 
@@ -480,28 +560,28 @@ def _build_compact_flow_text(
     raw = (raw_feedback or "").strip()
     source = _infer_pipeline_source(reasoning)
 
-    if any(k in raw for k in ("当前动作校验失败", "计划第", "校验失败")):
-        validate = "失败"
-    elif has_pending_plan or "预览" in raw:
-        validate = "通过(预览)"
+    if any(k in raw for k in ("当前动作校验失败", "计划第", "校验失败", "Current action validation failed", "validation failed")):
+        validate = "failed"
+    elif has_pending_plan or any(k in raw for k in ("预览", "Preview", "preview")):
+        validate = "passed (preview)"
     else:
-        validate = "通过"
+        validate = "passed"
 
-    if any(k in raw for k in ("执行失败", "后验失败", "已回滚")):
-        execute = "失败/回滚"
-    elif has_pending_plan or "请确认后再执行" in raw or "预览" in raw:
-        execute = "待确认"
+    if any(k in raw for k in ("执行失败", "后验失败", "已回滚", "Execution failed", "Rolled back", "rolled back")):
+        execute = "failed / rolled back"
+    elif has_pending_plan or any(k in raw for k in ("请确认后再执行", "Please confirm before execution", "预览", "Preview", "preview")):
+        execute = "awaiting confirmation"
     else:
-        execute = "已执行"
+        execute = "executed"
 
-    if "【目标态校验】" in raw:
-        verify = "通过" if "✅" in raw else "偏差"
-    elif "后验失败" in raw or "执行后校验失败" in raw:
-        verify = "失败"
+    if "【目标态校验】" in raw or "[Goal-State Verification]" in raw:
+        verify = "passed" if "✅" in raw else "mismatch"
+    elif any(k in raw for k in ("后验失败", "执行后校验失败", "Post-execution verification failed", "Goal-state verification failed")):
+        verify = "failed"
     else:
-        verify = "跳过"
+        verify = "skipped"
 
-    return f"解析[{source}] -> 校验[{validate}] -> 执行[{execute}] -> 验收[{verify}]"
+    return f"Parse[{source}] -> Validate[{validate}] -> Execute[{execute}] -> Verify[{verify}]"
 
 
 def _build_compact_feedback_view(
@@ -511,8 +591,8 @@ def _build_compact_feedback_view(
 ) -> str:
     flow = _build_compact_flow_text(raw_feedback, reasoning, has_pending_plan)
     lines = _compact_feedback_lines(raw_feedback)
-    detail = "\n".join(lines) if lines else "（暂无反馈）"
-    return f"【处理流程】\n{flow}\n\n【结果摘要】\n{detail}"
+    detail = "\n".join(lines) if lines else "(No feedback yet)"
+    return f"[Process]\n{flow}\n\n[Summary]\n{detail}"
 
 # 全局样式美化：现代化设计风格
 st.markdown(
@@ -1457,7 +1537,7 @@ with clock_col:
             const hh = pad(d.getHours());
             const mi = pad(d.getMinutes());
             const ss = pad(d.getSeconds());
-            const days = ['周日','周一','周二','周三','周四','周五','周六'];
+            const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
             document.getElementById('sp-date').textContent = `${yyyy}-${mm}-${dd}  ${days[d.getDay()]}`;
             document.getElementById('sp-time').textContent = `${hh}:${mi}:${ss}`;
           }
@@ -1598,12 +1678,12 @@ with clock_col:
             " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04)';"
               onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 20px rgba(0, 0, 0, 0.04), 0 1px 4px rgba(0, 0, 0, 0.02)';">
                 <div>
-                    <div style="font-size: 11px; color: #7a7872; font-weight: 600; margin-bottom: 3px;">🍅 番茄时间</div>
+                    <div style="font-size: 11px; color: #7a7872; font-weight: 600; margin-bottom: 3px;">🍅 Pomodoro</div>
                     <div id="pomo-display" style="font-size: 20px; font-weight: 800; color: #6b6a65; letter-spacing: -0.5px;">
                         {st.session_state.pomodoro_remaining // 60:02d}:{st.session_state.pomodoro_remaining % 60:02d}
                     </div>
                     <div id="pomo-status" style="font-size: 10px; color: #7a7872; margin-top: 3px; margin-bottom: 6px;">
-                        {('运行中' if st.session_state.pomodoro_running else '已暂停')}
+                        {('Running' if st.session_state.pomodoro_running else 'Paused')}
                     </div>
                 </div>
             </div>
@@ -1647,7 +1727,7 @@ with clock_col:
                         }}
                         
                         if (statusEl) {{
-                            statusEl.textContent = running ? '运行中' : '已暂停';
+                            statusEl.textContent = running ? 'Running' : 'Paused';
                         }}
                     }}
                     
@@ -1655,10 +1735,10 @@ with clock_col:
                         if (currentRemaining === 0 && running) {{
                             running = false;
                             
-                            // 浏览器通知
+                            // Browser notification
                             if ('Notification' in window && Notification.permission === 'granted') {{
-                                new Notification('🍅 番茄时间到！', {{
-                                    body: '时间到了，该休息一下了！',
+                                new Notification('🍅 Pomodoro finished!', {{
+                                    body: 'Time is up. Take a short break.',
                                     icon: '🍅',
                                     tag: 'pomodoro',
                                     requireInteraction: true
@@ -1666,8 +1746,8 @@ with clock_col:
                             }} else if ('Notification' in window && Notification.permission !== 'denied') {{
                                 Notification.requestPermission().then(permission => {{
                                     if (permission === 'granted') {{
-                                        new Notification('🍅 番茄时间到！', {{
-                                            body: '时间到了，该休息一下了！',
+                                        new Notification('🍅 Pomodoro finished!', {{
+                                            body: 'Time is up. Take a short break.',
                                             icon: '🍅',
                                             tag: 'pomodoro',
                                             requireInteraction: true
@@ -1923,7 +2003,7 @@ with clock_col:
 
     with preset_col1:
         button_type = "primary" if current_preset == 25 else "secondary"
-        if st.button("25分", key="pomo_25", use_container_width=True, type=button_type):
+        if st.button("25m", key="pomo_25", use_container_width=True, type=button_type):
             st.session_state.pomodoro_time = 25 * 60
             st.session_state.pomodoro_remaining = 25 * 60
             st.session_state.pomodoro_running = False
@@ -1932,7 +2012,7 @@ with clock_col:
             st.rerun()
     with preset_col2:
         button_type = "primary" if current_preset == 5 else "secondary"
-        if st.button("5分", key="pomo_5", use_container_width=True, type=button_type):
+        if st.button("5m", key="pomo_5", use_container_width=True, type=button_type):
             st.session_state.pomodoro_time = 5 * 60
             st.session_state.pomodoro_remaining = 5 * 60
             st.session_state.pomodoro_running = False
@@ -1941,7 +2021,7 @@ with clock_col:
             st.rerun()
     with preset_col3:
         button_type = "primary" if current_preset == 15 else "secondary"
-        if st.button("15分", key="pomo_15", use_container_width=True, type=button_type):
+        if st.button("15m", key="pomo_15", use_container_width=True, type=button_type):
             st.session_state.pomodoro_time = 15 * 60
             st.session_state.pomodoro_remaining = 15 * 60
             st.session_state.pomodoro_running = False
@@ -1954,12 +2034,12 @@ with clock_col:
     custom_label_col, custom_slider_col, custom_value_col, custom_apply_col = st.columns([1.2, 5.2, 1.2, 1.6])
     with custom_label_col:
         st.markdown(
-            '<div style="font-size:0.66rem;color:#64748b;font-weight:600;line-height:1.1;margin-top:0.55rem;">自定义</div>',
+            '<div style="font-size:0.66rem;color:#64748b;font-weight:600;line-height:1.1;margin-top:0.55rem;">Custom</div>',
             unsafe_allow_html=True,
         )
     with custom_slider_col:
         custom_minutes_slider = st.slider(
-            "自定义时长",
+            "Custom duration",
             min_value=1,
             max_value=120,
             value=st.session_state.pomodoro_custom_minutes,
@@ -1981,14 +2061,14 @@ with clock_col:
               margin-top:0.45rem;
               line-height:1.1;
             ">
-              {custom_minutes_slider}分
+              {custom_minutes_slider}m
             </div>
             """,
             unsafe_allow_html=True,
         )
     with custom_apply_col:
         if st.button(
-            "应用",
+            "Apply",
             key="pomo_apply_custom",
             use_container_width=True,
             type="primary" if st.session_state.pomodoro_use_custom else "secondary",
@@ -2014,7 +2094,7 @@ with clock_col:
           margin-top:0.15rem;
           margin-bottom:0.15rem;
         ">
-          当前：{current_minutes_display} 分钟
+          Current: {current_minutes_display} min
         </div>
         """,
         unsafe_allow_html=True,
@@ -2024,7 +2104,7 @@ with clock_col:
     control_col1, control_col2 = st.columns(2)
     with control_col1:
         if st.session_state.pomodoro_running:
-            if st.button("⏸️ 暂停", key="pomo_pause", use_container_width=True):
+            if st.button("⏸️ Pause", key="pomo_pause", use_container_width=True):
                 if st.session_state.pomodoro_start_time:
                     elapsed = int((datetime.now().timestamp() * 1000 - st.session_state.pomodoro_start_time) / 1000)
                     st.session_state.pomodoro_remaining = max(0, st.session_state.pomodoro_remaining - elapsed)
@@ -2032,12 +2112,12 @@ with clock_col:
                 st.session_state.pomodoro_start_time = None
                 st.rerun()
         else:
-            if st.button("▶️ 开始", key="pomo_start", use_container_width=True, type="primary"):
+            if st.button("▶️ Start", key="pomo_start", use_container_width=True, type="primary"):
                 st.session_state.pomodoro_running = True
                 st.session_state.pomodoro_start_time = datetime.now().timestamp() * 1000
                 st.rerun()
     with control_col2:
-        if st.button("🔄 重置", key="pomo_reset", use_container_width=True):
+        if st.button("🔄 Reset", key="pomo_reset", use_container_width=True):
             st.session_state.pomodoro_remaining = st.session_state.pomodoro_time
             st.session_state.pomodoro_running = False
             st.session_state.pomodoro_start_time = None
@@ -2061,16 +2141,16 @@ with pomodoro_col:
         with header_col1:
             st.markdown("""
             <div style="margin: 0; padding: 0;">
-              <h2 style="margin: 0; color: #6b6a65; font-weight: 700; font-size: 1.1rem;">📅 日程管理</h2>
+              <h2 style="margin: 0; color: #6b6a65; font-weight: 700; font-size: 1.1rem;">📅 Schedule Management</h2>
             </div>
             """, unsafe_allow_html=True)
         with header_col2:
             try:
-                view_d = st.date_input("查看日期", value=st.session_state.view_date, key="view_date_input", label_visibility="collapsed")
+                view_d = st.date_input("View date", value=st.session_state.view_date, key="view_date_input", label_visibility="collapsed")
                 st.session_state.view_date = view_d
                 all_tasks = get_tasks_for_date(view_d)
             except Exception as e:
-                st.error("请先配置 SUPABASE_URL 和 SUPABASE_KEY")
+                st.error("Please configure `SUPABASE_URL` and `SUPABASE_KEY` first.")
                 all_tasks = []
                 view_d = date.today()
     
@@ -2079,15 +2159,15 @@ with pomodoro_col:
         search_col1, search_col2 = st.columns([5, 1])
         with search_col1:
             search_keyword = st.text_input(
-                "搜索任务",
+                "Search tasks",
                 value=st.session_state.search_keyword,
                 key="search_input",
-                placeholder="🔍 搜索任务...",
+                placeholder="🔍 Search tasks...",
                 label_visibility="collapsed"
             )
             st.session_state.search_keyword = search_keyword
         with search_col2:
-            if st.button("清除", use_container_width=True):
+            if st.button("Clear", use_container_width=True):
                 st.session_state.search_keyword = ""
                 st.rerun()
     
@@ -2102,13 +2182,13 @@ with pomodoro_col:
         # 使用4列均匀布局，确保统计卡片完整显示
         stat_cols = st.columns(4)
         with stat_cols[0]:
-            st.metric("总任务", stats["total"] if stats["total"] > 0 else 0)
+            st.metric("Total tasks", stats["total"] if stats["total"] > 0 else 0)
         with stat_cols[1]:
-            st.metric("已完成", stats["done"] if stats["total"] > 0 else 0)
+            st.metric("Completed", stats["done"] if stats["total"] > 0 else 0)
         with stat_cols[2]:
-            st.metric("待办", stats["pending"] if stats["total"] > 0 else 0)
+            st.metric("Pending", stats["pending"] if stats["total"] > 0 else 0)
         with stat_cols[3]:
-            st.metric("总时长", f"{stats['total_hours']}h" if stats["total"] > 0 else "0h")
+            st.metric("Total hours", f"{stats['total_hours']}h" if stats["total"] > 0 else "0h")
     
     # 获取任务（支持搜索）
     if search_keyword and search_keyword.strip():
@@ -2121,7 +2201,7 @@ with pomodoro_col:
     with st.container(border=True):
         st.markdown("""
         <div style="margin-bottom: 0.75rem;">
-          <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 今日概览</span>
+          <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 Day Overview</span>
         </div>
         """, unsafe_allow_html=True)
         
@@ -2178,7 +2258,7 @@ with pomodoro_col:
                 y_ticks.insert(0, mid)
             y_ticks.insert(0, max_hour_duration)
         y_ticks_str = "".join(
-            f'<span style="font-size: 0.65rem; color: #64748b;">{v}分钟</span>' for v in y_ticks
+            f'<span style="font-size: 0.65rem; color: #64748b;">{v}m</span>' for v in y_ticks
         )
         
         # 柱状图横向滚动：固定内容宽度、单层 overflow，避免闪烁；滚轮横向/Shift+竖向 滚动容器
@@ -2187,7 +2267,7 @@ with pomodoro_col:
         chart_html = f"""
         <div class="hour-chart-root" style="margin-bottom: 1rem; width: 100%;">
           <div style="font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem; font-weight: 600;">
-            总工作时长：{total_hours}小时{total_remaining_minutes}分钟
+            Total work time: {total_hours}h {total_remaining_minutes}m
           </div>
           <div style="display: flex; flex-direction: row; align-items: stretch; width: 100%; min-width: 0;">
             <div style="display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; height: {max_height + 40}px; padding-right: 6px; border-right: 1px solid #e2e8f0; min-width: 42px; flex-shrink: 0;">
@@ -2208,7 +2288,7 @@ with pomodoro_col:
             else:
                 height = 0
             bar_color = "#6366f1" if minutes > 0 else "#e2e8f0"
-            tooltip_text = f"{hour}时: {minutes}分钟"
+            tooltip_text = f"{hour:02d}:00 - {minutes} min"
             
             chart_html += f"""
             <div class="bar-wrap" style="width: {bar_col_width - 2}px; min-width: {bar_col_width - 2}px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; position: relative;">
@@ -2229,7 +2309,7 @@ with pomodoro_col:
         # 横坐标 0～24 时：与 24 根柱一一对齐，刻度 0/6/12/18/24 时
         axis_cell_style = f"width: {bar_col_width - 2}px; min-width: {bar_col_width - 2}px; flex-shrink: 0; font-size: 0.6rem; color: #94a3b8; text-align: center; line-height: 16px;"
         axis_labels_html = "".join(
-            f'<div style="{axis_cell_style}">{h}时</div>' if h in (0, 6, 12, 18) else (f'<div style="{axis_cell_style}">24时</div>' if h == 23 else f'<div style="{axis_cell_style}"></div>')
+            f'<div style="{axis_cell_style}">{h}:00</div>' if h in (0, 6, 12, 18) else (f'<div style="{axis_cell_style}">24:00</div>' if h == 23 else f'<div style="{axis_cell_style}"></div>')
             for h in range(24)
         )
         chart_html += f"""
@@ -2270,7 +2350,7 @@ with pomodoro_col:
         if task_duration_by_title:
             st.markdown("""
             <div style="margin-bottom: 0.5rem;">
-              <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">📋 任务时长统计</span>
+              <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">📋 Time by Task</span>
             </div>
             """, unsafe_allow_html=True)
             
@@ -2280,7 +2360,7 @@ with pomodoro_col:
             for title, minutes in sorted_tasks[:5]:  # 最多显示5个
                 hours = minutes // 60
                 mins = minutes % 60
-                duration_str = f"{hours}小时{mins}分钟" if hours > 0 else f"{mins}分钟"
+                duration_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
                 
                 task_stat_html = f"""
                 <div style="
@@ -2305,7 +2385,7 @@ with pomodoro_col:
         # 正在执行的任务（放到今日概览卡片内）
         st.markdown("""
         <div style="margin-top: 0.75rem; margin-bottom: 0.35rem;">
-          <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">⚡ 正在执行的任务</span>
+          <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">⚡ Active Task</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -2369,11 +2449,11 @@ with pomodoro_col:
 
             total_display_minutes = total_work_minutes + current_elapsed_minutes
             work_time_str = (
-                f"{total_display_minutes // 60}小时{total_display_minutes % 60}分钟"
+                f"{total_display_minutes // 60}h {total_display_minutes % 60}m"
                 if total_display_minutes > 0
-                else "0分钟"
+                else "0m"
             )
-            timer_status = "⏱️ 计时中" if is_timer_running else "⏸️ 已暂停"
+            timer_status = "⏱️ Running" if is_timer_running else "⏸️ Paused"
 
             if is_timer_running and start_time_iso:
                 # 计时中：用 JS 实时刷新累计时间（卡片更紧凑）
@@ -2398,7 +2478,7 @@ with pomodoro_col:
                       <div style="flex:1;">
                         <div style="font-weight:700; color:#6b6a65; font-size:0.85rem;">{executing_task.title}</div>
                         <div style="color:#7a7872; font-size:0.72rem; margin-top:0.2rem;">
-                          🕐 {st_str}–{et_str} | {timer_status} | 累计：<span id="work-time-display-{executing_task.id}">{work_time_str}</span>
+                          🕐 {st_str}–{et_str} | {timer_status} | Worked: <span id="work-time-display-{executing_task.id}">{work_time_str}</span>
                         </div>
                       </div>
                     </div>
@@ -2413,7 +2493,7 @@ with pomodoro_col:
                         const totalMinutes = baseMinutes + Math.max(0, elapsedMinutes);
                         const h = Math.floor(totalMinutes / 60);
                         const m = totalMinutes % 60;
-                        const s = h > 0 ? `${{h}}小时${{m}}分钟` : `${{m}}分钟`;
+                        const s = h > 0 ? `${{h}}h ${{m}}m` : `${{m}}m`;
                         const el = document.getElementById('work-time-display-{executing_task.id}');
                         if (el) el.textContent = s;
                       }}
@@ -2439,19 +2519,19 @@ with pomodoro_col:
                       <div style="display:flex; align-items:flex-start; gap:0.55rem;">
                         <span style="font-size:1.05rem; line-height:1;">⚡</span>
                         <div style="flex:1;">
-                          <div style="font-weight:700; color:#6b6a65; font-size:0.85rem;">{executing_task.title}</div>
-                          <div style="color:#7a7872; font-size:0.72rem; margin-top:0.2rem;">
-                            🕐 {st_str}–{et_str} | {timer_status} | 累计：{work_time_str}
-                          </div>
+                        <div style="font-weight:700; color:#6b6a65; font-size:0.85rem;">{executing_task.title}</div>
+                        <div style="color:#7a7872; font-size:0.72rem; margin-top:0.2rem;">
+                            🕐 {st_str}–{et_str} | {timer_status} | Worked: {work_time_str}
                         </div>
                       </div>
+                    </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
         else:
             st.markdown(
-                '<div style="color:#9a9892;font-size:0.75rem;padding:0.35rem 0;text-align:center;">暂无正在执行的任务</div>',
+                '<div style="color:#9a9892;font-size:0.75rem;padding:0.35rem 0;text-align:center;">No active task</div>',
                 unsafe_allow_html=True,
             )
         
@@ -2459,7 +2539,7 @@ with pomodoro_col:
         if high_priority_tasks:
             st.markdown("""
             <div style="margin-bottom: 0.5rem;">
-              <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">🔴 高优先级待办</span>
+              <span style="font-size: 0.75rem; color: #64748b; font-weight: 600;">🔴 High-Priority Pending</span>
             </div>
             """, unsafe_allow_html=True)
             
@@ -2495,7 +2575,7 @@ with pomodoro_col:
               color: #64748b;
               font-size: 0.75rem;
             ">
-              ✅ 暂无高优先级待办
+              ✅ No high-priority pending tasks
             </div>
             """, unsafe_allow_html=True)
     
@@ -2509,7 +2589,7 @@ with st.container(border=True):
             # 没有任务时，显示空的时间轴和引导信息
             st.markdown("""
             <div style="margin-bottom: 0.5rem;">
-              <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 时间轴视图</span>
+              <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 Timeline View</span>
             </div>
             """, unsafe_allow_html=True)
             # 显示空的时间轴（24小时），固定高度240px（4小时），支持滚动查看完整24小时
@@ -2528,14 +2608,14 @@ with st.container(border=True):
               border: 1px solid rgba(148, 163, 184, 0.2);
             ">
               <span style="color: #7a7872; font-weight: 500; font-size: 0.75rem;">
-                💡 不同任务块使用不同颜色（同任务同色） | <span style="color: #ef4444;">🔴 高优先级更显眼</span> | <span style="color: #10b981;">🟢 已完成更淡</span>
+                💡 Each task block uses a stable color | <span style="color: #ef4444;">🔴 High priority stands out</span> | <span style="color: #10b981;">🟢 Completed items are faded</span>
               </span>
             </div>
             """, unsafe_allow_html=True)
             
             # 显示引导信息
             if search_keyword and search_keyword.strip():
-                st.info(f"🔍 未找到包含「{search_keyword}」的任务")
+                st.info(f'🔍 No tasks matched "{search_keyword}"')
             else:
                 st.markdown("""
                 <div style="
@@ -2547,9 +2627,9 @@ with st.container(border=True):
                   margin-top: 1rem;
                 ">
                   <div style="font-size: 3rem; margin-bottom: 1rem;">📅</div>
-                  <h3 style="color: #6b6a65; margin-bottom: 0.5rem;">该日暂无任务</h3>
+                  <h3 style="color: #6b6a65; margin-bottom: 0.5rem;">No tasks scheduled for this day</h3>
                   <p style="color: #7a7872; margin-bottom: 1rem;">
-                    在左侧输入框输入指令，例如：
+                    Enter a command in the chat box, for example:
                   </p>
                   <div style="
                     background: rgba(255, 255, 255, 0.9);
@@ -2559,11 +2639,11 @@ with st.container(border=True):
                     text-align: left;
                     border: 1px solid rgba(148, 163, 184, 0.2);
                   ">
-                    <div style="color: #7a7872; font-weight: 600; margin-bottom: 0.5rem;">💡 示例指令：</div>
+                    <div style="color: #7a7872; font-weight: 600; margin-bottom: 0.5rem;">💡 Example commands:</div>
                     <div style="color: #7a7872; font-size: 0.9rem; line-height: 1.8;">
-                      • 添加 下午三点 写代码<br/>
-                      • 安排 明天上午9点 开会 2小时<br/>
-                      • 添加 晚上8点 运动 1小时
+                      • Add coding at 3 PM<br/>
+                      • Schedule a meeting tomorrow at 9 AM for 2 hours<br/>
+                      • Add exercise at 8 PM for 1 hour
                     </div>
                   </div>
                     </div>
@@ -2572,7 +2652,7 @@ with st.container(border=True):
             # 有任务时，显示时间轴
             st.markdown("""
             <div style="margin-bottom: 0.5rem;">
-              <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 时间轴视图</span>
+              <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📊 Timeline View</span>
             </div>
             """, unsafe_allow_html=True)
             # 支持24小时显示（0-24点），固定高度240px（4小时），支持滚动查看完整24小时
@@ -2591,7 +2671,7 @@ with st.container(border=True):
               border: 1px solid rgba(148, 163, 184, 0.2);
             ">
               <span style="color: #64748b; font-weight: 500; font-size: 0.7rem;">
-                💡 不同任务块使用不同颜色（同任务同色） | <span style="color: #ef4444;">🔴 高优先级更显眼</span> | <span style="color: #10b981;">🟢 已完成更淡</span>
+                💡 Each task block uses a stable color | <span style="color: #ef4444;">🔴 High priority stands out</span> | <span style="color: #10b981;">🟢 Completed items are faded</span>
               </span>
             </div>
             """, unsafe_allow_html=True)
@@ -2602,7 +2682,7 @@ if tasks:
     with st.container(border=True):
         st.markdown(f"""
         <div style="margin-bottom: 0.5rem;">
-          <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📋 任务列表 ({len(tasks)} 项)</span>
+          <span style="font-weight: 600; color: #475569; font-size: 0.875rem;">📋 Task List ({len(tasks)})</span>
         </div>
         """, unsafe_allow_html=True)
         # 任务列表（带操作按钮和进度条）
@@ -2671,16 +2751,16 @@ if tasks:
                     if display_as_done:
                         color = "🟢"
                         progress_class = "done"
-                        progress_text = "已完成"
+                        progress_text = "Done"
                     else:
                         if user_progress is not None:
-                            progress_text = "进度"
+                            progress_text = "Progress"
                         elif progress >= 100:
-                            progress_text = "已过期"
+                            progress_text = "Overdue"
                         elif progress == 0:
-                            progress_text = "未开始"
+                            progress_text = "Not started"
                         else:
-                            progress_text = "进度"
+                            progress_text = "Progress"
                         if t.priority == "high":
                             color = "🔴"
                             progress_class = "high"
@@ -2694,13 +2774,13 @@ if tasks:
                       <span style="font-size: 1rem;">{color}</span>
                       <span style="font-weight: 700; font-size: 0.95rem; color: #6b6a65; flex: 1; min-width: 80px;">{t.title}</span>
                       <span style="font-size: 0.75rem; color: #7a7872; font-weight: 600;">{st_str}–{et_str}</span>
-                      <span style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border-radius: 8px; font-weight: 600; background: {'rgba(16,185,129,0.1)' if display_as_done else 'rgba(59,130,246,0.1)'}; color: #7a7872;">{'已完成' if display_as_done else '待办'}</span>
+                      <span style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border-radius: 8px; font-weight: 600; background: {'rgba(16,185,129,0.1)' if display_as_done else 'rgba(59,130,246,0.1)'}; color: #7a7872;">{'Done' if display_as_done else 'Pending'}</span>
                     </div>
                     """, unsafe_allow_html=True)
                     # 使用 Streamlit 原生进度条：已完成任务禁用拖动
                     progress_slider_disabled = display_as_done
                     new_progress = st.slider(
-                        "进度",
+                        "Progress",
                         min_value=0,
                         max_value=100,
                         value=progress,
@@ -2724,24 +2804,24 @@ if tasks:
                     task_col1, task_col2, task_col3 = st.columns([1, 1, 1])
                     with task_col1:
                         if not is_task_timer_running:
-                            if st.button("▶️ 开始", key=f"tasklist_start_{t.id}", use_container_width=True):
+                            if st.button("▶️ Start", key=f"tasklist_start_{t.id}", use_container_width=True):
                                 ok, msg = start_task_timer(str(t.id))
                                 st.session_state.last_feedback = msg
                                 st.session_state.current_executing_task_id = str(t.id)
                                 st.rerun()
                         else:
-                            if st.button("⏸️ 暂停", key=f"tasklist_pause_{t.id}", use_container_width=True):
+                            if st.button("⏸️ Pause", key=f"tasklist_pause_{t.id}", use_container_width=True):
                                 ok, msg = pause_task_timer(str(t.id))
                                 st.session_state.last_feedback = msg
                                 st.rerun()
                     with task_col2:
-                        button_label = "✓ 完成" if t.status == "pending" else "↩ 待办"
+                        button_label = "✓ Complete" if t.status == "pending" else "↩ Reopen"
                         if st.button(button_label, key=f"tasklist_toggle_{t.id}", use_container_width=True):
                             ok, msg = toggle_task_status(str(t.id))
                             st.session_state.last_feedback = msg
                             st.rerun()
                     with task_col3:
-                        if st.button("🗑 删除", key=f"tasklist_delete_{t.id}", use_container_width=True):
+                        if st.button("🗑 Delete", key=f"tasklist_delete_{t.id}", use_container_width=True):
                             ok, msg = delete_task_by_id(str(t.id))
                             st.session_state.last_feedback = msg
                             st.rerun()
@@ -2756,49 +2836,52 @@ with st.container(border=True):
           gap: 0.5rem;
           margin-bottom: 1rem;
         ">
-          <h2 style="margin: 0; color: #6b6a65; font-weight: 700;">💬 对话与反馈</h2>
+          <h2 style="margin: 0; color: #6b6a65; font-weight: 700;">💬 Conversation & Feedback</h2>
         </div>
         """, unsafe_allow_html=True)
         has_pending = st.session_state.get("pending_plan") is not None
-        compact_flow = _build_compact_flow_text(
-            st.session_state.last_feedback or "",
-            st.session_state.llm_reasoning or "",
-            has_pending,
-        )
-        compact_feedback = _build_compact_feedback_view(
-            st.session_state.last_feedback or "",
-            st.session_state.llm_reasoning or "",
-            has_pending,
-        )
-        dialog_text = ""
-        if (st.session_state.get("last_user_prompt") or "").strip():
-            dialog_text = f"你：{_truncate_text(st.session_state.last_user_prompt, 100)}\n系统：{compact_flow}"
+        if not st.session_state.last_feedback and not (st.session_state.get("last_user_prompt") or "").strip():
+            st.info("👋 Welcome! Ask me to schedule a task or generate a report to get started.", icon="✨")
         else:
-            dialog_text = f"系统：{compact_flow}"
+            compact_flow = _build_compact_flow_text(
+                st.session_state.last_feedback or "",
+                st.session_state.llm_reasoning or "",
+                has_pending,
+            )
+            compact_feedback = _build_compact_feedback_view(
+                st.session_state.last_feedback or "",
+                st.session_state.llm_reasoning or "",
+                has_pending,
+            )
+            dialog_text = ""
+            if (st.session_state.get("last_user_prompt") or "").strip():
+                dialog_text = f"You: {_truncate_text(st.session_state.last_user_prompt, 100)}\nSystem: {compact_flow}"
+            else:
+                dialog_text = f"System: {compact_flow}"
 
-        st.text_area(
-            "对话摘要",
-            value=dialog_text,
-            height=72,
-            disabled=True,
-            label_visibility="collapsed",
-            help="简化后的对话流程"
-        )
-        st.text_area(
-            "反馈",
-            value=compact_feedback,
-            height=180,
-            disabled=True,
-            label_visibility="collapsed",
-            help="系统反馈信息（精简版）"
-        )
+            st.text_area(
+                "Conversation summary",
+                value=dialog_text,
+                height=72,
+                disabled=True,
+                label_visibility="collapsed",
+                help="Condensed conversation flow"
+            )
+            st.text_area(
+                "Feedback",
+                value=compact_feedback,
+                height=180,
+                disabled=True,
+                label_visibility="collapsed",
+                help="Condensed system feedback"
+            )
         if st.session_state.get("llm_reasoning"):
-            with st.expander("🧠 LLM 思考过程", expanded=False):
+            with st.expander("🧠 LLM reasoning", expanded=False):
                 st.markdown(st.session_state.llm_reasoning)
         if st.session_state.get("overflow_warning"):
-            st.warning(st.session_state.overflow_warning)
+            st.warning(_translate_feedback_text(st.session_state.overflow_warning))
             st.session_state.overflow_warning = None
-        prompt = st.chat_input("💡 输入指令，如：把下午两点的会推迟一小时")
+        prompt = st.chat_input("💡 Enter a command, for example: move my 2 PM meeting back by one hour")
         if prompt:
             try:
                 # 无记忆模式：每轮仅传当前用户输入，不向服务层传历史消息
@@ -2810,17 +2893,16 @@ with st.container(border=True):
                 if warn:
                     st.session_state.overflow_warning = warn
             except Exception as e:
-                error_msg = f"执行失败：{e}"
-                st.session_state.last_feedback = error_msg
+                st.session_state.last_feedback = f"Execution failed: {e}"
                 st.session_state.last_user_prompt = prompt
             st.rerun()
 
         # ---- 需要确认的预览计划 ----
         if st.session_state.get("pending_plan") is not None:
             plan = st.session_state.pending_plan
-            st.markdown("### 📋 预览变更")
-            st.caption("💡 如果不满意此计划，点击「取消」后可在上方输入框继续描述您的需求，我会根据您的反馈重新调整。")
-            st.markdown("**修改前 → 修改后：**")
+            st.markdown("### 📋 Planned Changes Preview")
+            st.caption("💡 If this plan is not right, click Cancel and describe what you want in the chat box above. The plan will be revised based on your feedback.")
+            st.markdown("**Before → After**")
             
             # 显示详细的修改前后信息
             for update in plan.updates:
@@ -2841,36 +2923,36 @@ with st.container(border=True):
                 """)
             
             if plan.overflow_warning:
-                st.warning(plan.overflow_warning)
+                st.warning(_translate_feedback_text(plan.overflow_warning))
             
             st.markdown("---")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("✅ 确认执行", use_container_width=True, type="primary"):
+                if st.button("✅ Confirm & Run", use_container_width=True, type="primary"):
                     try:
                         reply, warn = apply_pending_plan(plan)
                         st.session_state.last_feedback = reply
                         st.session_state.pending_plan = None
-                        st.session_state.last_user_prompt = "确认执行预览计划"
+                        st.session_state.last_user_prompt = "Confirm preview plan"
                         if warn:
                             st.session_state.overflow_warning = warn
                     except Exception as e:
-                        st.session_state.last_feedback = f"执行失败：{e}"
-                        st.session_state.last_user_prompt = "确认执行预览计划"
+                        st.session_state.last_feedback = f"Execution failed: {e}"
+                        st.session_state.last_user_prompt = "Confirm preview plan"
                     st.rerun()
             with c2:
-                if st.button("❌ 取消", use_container_width=True):
+                if st.button("❌ Cancel", use_container_width=True):
                     st.session_state.pending_plan = None
-                    st.session_state.last_feedback = "已取消本次调整。您可以在上方输入框继续输入新的指令，我会根据您的反馈重新调整计划。"
-                    st.session_state.last_user_prompt = "取消预览计划"
+                    st.session_state.last_feedback = "This adjustment was cancelled. You can enter a new instruction above and I will revise the plan based on your feedback."
+                    st.session_state.last_user_prompt = "Cancel preview plan"
                     st.rerun()
 
         # ---- 系统日志回溯 ----
         if st.session_state.get("show_logs", False):
-            with st.expander("系统日志", expanded=True):
+            with st.expander("System logs", expanded=True):
                 logs = get_recent_logs(limit=200)
                 if not logs:
-                    st.info("暂无日志记录")
+                    st.info("No logs available.")
                 else:
                     # 按时间倒序显示（最新的在前）
                     logs_reversed = list(reversed(logs))
@@ -2879,7 +2961,7 @@ with st.container(border=True):
                         for log in logs_reversed
                     ])
                     st.text_area(
-                        "最近200条日志",
+                        "Latest 200 log lines",
                         value=log_text,
                         height=400,
                         disabled=True,
@@ -2904,7 +2986,7 @@ st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 with st.container(border=True):
         st.markdown("""
         <div style="margin: 0; padding: 0;">
-          <h2 style="margin: 0; color: #6b6a65; font-weight: 700; font-size: 1.1rem;">📌 提醒事项</h2>
+          <h2 style="margin: 0; color: #6b6a65; font-weight: 700; font-size: 1.1rem;">📌 Reminders</h2>
         </div>
         """, unsafe_allow_html=True)
         
@@ -2912,26 +2994,26 @@ with st.container(border=True):
         try:
             reminders = repo.all_reminders()
         except Exception as e:
-            st.error(f"加载提醒事项失败: {e}")
+            st.error(f"Failed to load reminders: {e}")
             reminders = []
         
         # 添加新提醒事项
         new_reminder_col1, new_reminder_col2 = st.columns([4, 1])
         with new_reminder_col1:
             new_reminder_text = st.text_input(
-                "添加提醒事项",
+                "Add reminder",
                 key="new_reminder_input",
-                placeholder="输入重要事项...",
+                placeholder="Type an important reminder...",
                 label_visibility="collapsed"
             )
         with new_reminder_col2:
-            if st.button("➕ 添加", key="add_reminder", use_container_width=True):
+            if st.button("➕ Add", key="add_reminder", use_container_width=True):
                 if new_reminder_text and new_reminder_text.strip():
                     try:
                         repo.insert_reminder(new_reminder_text.strip())
                         st.rerun()
                     except Exception as e:
-                        st.error(f"添加失败: {e}")
+                        st.error(f"Add failed: {e}")
         
         # 显示提醒事项列表
         if reminders:
@@ -2941,7 +3023,7 @@ with st.container(border=True):
                 with reminder_col1:
                     # 复选框：打对勾
                     checked = st.checkbox(
-                        "完成",
+                        "Complete",
                         value=reminder.is_completed,
                         key=f"reminder_check_{reminder.id}",
                         label_visibility="collapsed"
@@ -2951,7 +3033,7 @@ with st.container(border=True):
                             repo.update_reminder(str(reminder.id), {"is_completed": checked})
                             st.rerun()
                         except Exception as e:
-                            st.error(f"更新失败: {e}")
+                            st.error(f"Update failed: {e}")
                 
                 with reminder_col2:
                     # 显示提醒内容（已完成则添加删除线）
@@ -2960,30 +3042,30 @@ with st.container(border=True):
                 
                 with reminder_col3:
                     # 删除按钮
-                    if st.button("🗑️", key=f"delete_reminder_{reminder.id}", help="删除"):
+                    if st.button("🗑️", key=f"delete_reminder_{reminder.id}", help="Delete"):
                         try:
                             repo.delete_reminder(str(reminder.id))
                             st.rerun()
                         except Exception as e:
-                            st.error(f"删除失败: {e}")
+                            st.error(f"Delete failed: {e}")
         else:
-            st.markdown('<div style="color: #9a9892; font-size: 0.85rem; padding: 1rem 0; text-align: center;">暂无提醒事项</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color: #9a9892; font-size: 0.85rem; padding: 1rem 0; text-align: center;">No reminders yet</div>', unsafe_allow_html=True)
 
 # 报表栏目：放在最后，占据整个宽度
 st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div style="margin-bottom: 0.75rem;">
-  <span style="font-weight: 600; color: #7a7872; font-size: 0.875rem;">📊 报表</span>
+  <span style="font-weight: 600; color: #7a7872; font-size: 0.875rem;">📊 Reports</span>
 </div>
 """, unsafe_allow_html=True)
 
 # 日报栏目
 if st.session_state.daily_report_text:
     with st.container(border=True):
-        st.markdown("### 📝 日报")
+        st.markdown("### 📝 Daily Report")
         st.write(st.session_state.daily_report_text)
         st.download_button(
-            "📥 导出日报",
+            "📥 Export daily report",
             data=st.session_state.daily_report_text,
             file_name=f"daily_report_{date.today().isoformat()}.txt",
             mime="text/plain",
@@ -2993,10 +3075,10 @@ if st.session_state.daily_report_text:
 # 周报栏目
 if st.session_state.weekly_report_text:
     with st.container(border=True):
-        st.markdown("### 📊 周报")
+        st.markdown("### 📊 Weekly Report")
         st.write(st.session_state.weekly_report_text)
         st.download_button(
-            "📥 导出周报",
+            "📥 Export weekly report",
             data=st.session_state.weekly_report_text,
             file_name=f"weekly_report_{date.today().isoformat()}.txt",
             mime="text/plain",
@@ -3006,10 +3088,10 @@ if st.session_state.weekly_report_text:
 # 月报栏目
 if st.session_state.monthly_report_text:
     with st.container(border=True):
-        st.markdown("### 📅 月报")
+        st.markdown("### 📅 Monthly Report")
         st.write(st.session_state.monthly_report_text)
         st.download_button(
-            "📥 导出月报",
+            "📥 Export monthly report",
             data=st.session_state.monthly_report_text,
             file_name=f"monthly_report_{date.today().year}-{date.today().month:02d}.txt",
             mime="text/plain",
@@ -3020,44 +3102,44 @@ if st.session_state.monthly_report_text:
 st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div style="margin-bottom: 0.75rem;">
-  <span style="font-weight: 600; color: #7a7872; font-size: 0.875rem;">⚙️ 快捷操作</span>
+  <span style="font-weight: 600; color: #7a7872; font-size: 0.875rem;">⚙️ Quick Actions</span>
 </div>
 """, unsafe_allow_html=True)
 
 # 功能按钮 - 两行布局，每行3个按钮
 btn_col1, btn_col2, btn_col3 = st.columns(3)
 with btn_col1:
-    if st.button("📊 周报", use_container_width=True):
+    if st.button("📊 Weekly Report", use_container_width=True):
         cache_key = f"weekly_{date.today().isoformat()}"
         if cache_key in st.session_state.report_cache:
             st.session_state.weekly_report_text = st.session_state.report_cache[cache_key]
-            st.session_state.last_feedback = "周报已生成（从缓存加载，见下方「周报」栏目）。"
+            st.session_state.last_feedback = "Weekly report generated (loaded from cache; see the Weekly Report section below)."
         else:
             try:
                 text = get_weekly_report_text()
                 st.session_state.weekly_report_text = text
                 st.session_state.report_cache[cache_key] = text
-                st.session_state.last_feedback = "周报已生成（见下方「周报」栏目）。"
+                st.session_state.last_feedback = "Weekly report generated (see the Weekly Report section below)."
             except Exception as e:
-                st.session_state.last_feedback = f"周报生成失败：{e}"
+                st.session_state.last_feedback = f"Weekly report generation failed: {e}"
         st.rerun()
 with btn_col2:
-    if st.button("📅 月报", use_container_width=True):
+    if st.button("📅 Monthly Report", use_container_width=True):
         cache_key = f"monthly_{date.today().year}-{date.today().month:02d}"
         if cache_key in st.session_state.report_cache:
             st.session_state.monthly_report_text = st.session_state.report_cache[cache_key]
-            st.session_state.last_feedback = "月报已生成（从缓存加载，见下方「月报」栏目）。"
+            st.session_state.last_feedback = "Monthly report generated (loaded from cache; see the Monthly Report section below)."
         else:
             try:
                 text = get_monthly_report_text()
                 st.session_state.monthly_report_text = text
                 st.session_state.report_cache[cache_key] = text
-                st.session_state.last_feedback = "月报已生成（见下方「月报」栏目）。"
+                st.session_state.last_feedback = "Monthly report generated (see the Monthly Report section below)."
             except Exception as e:
-                st.session_state.last_feedback = f"月报生成失败：{e}"
+                st.session_state.last_feedback = f"Monthly report generation failed: {e}"
         st.rerun()
 with btn_col3:
-    if st.button("📝 日报", use_container_width=True):
+    if st.button("📝 Daily Report", use_container_width=True):
         today_str = date.today().isoformat()
         try:
             # 每次查询都重新生成并更新日报内容
@@ -3065,72 +3147,72 @@ with btn_col3:
             st.session_state.daily_report_text = content
             cache_key = f"daily_{today_str}"
             st.session_state.report_cache[cache_key] = content
-            st.session_state.last_feedback = "今日日报已归档（见下方「日报」栏目）。"
+            st.session_state.last_feedback = "Today's daily report has been archived (see the Daily Report section below)."
         except Exception as e:
-            st.session_state.last_feedback = f"归档失败：{e}"
+            st.session_state.last_feedback = f"Archive failed: {e}"
         st.rerun()
 
 btn_col4, btn_col5, btn_col6 = st.columns(3)
 with btn_col4:
-    if st.button("↩ 撤销", use_container_width=True):
+    if st.button("↩ Undo", use_container_width=True):
         ok, msg = undo_last()
         st.session_state.last_feedback = msg
         st.rerun()
 with btn_col5:
-    if st.button("📋 日志", use_container_width=True):
+    if st.button("📋 Logs", use_container_width=True):
         st.session_state.show_logs = not st.session_state.get("show_logs", False)
         st.rerun()
 with btn_col6:
-    if st.button("⏰ 延期", use_container_width=True):
+    if st.button("⏰ Reschedule Overdue", use_container_width=True):
         try:
             count, msg = check_and_reschedule_overdue_tasks()
             st.session_state.last_feedback = msg
         except Exception as e:
-            st.session_state.last_feedback = f"检查失败：{e}"
+            st.session_state.last_feedback = f"Check failed: {e}"
         st.rerun()
 
 # ---------- 长周期任务管理（全宽，添加到最后） ----------
 st.markdown("<div style='height: 1rem;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div style="margin-bottom: 0.75rem;">
-  <span style="font-weight: 700; color: #6b6a65; font-size: 0.95rem;">🧭 长周期任务管理</span>
-  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">项目 / 里程碑 / 子任务（监督进度与风险）</span>
+  <span style="font-weight: 700; color: #6b6a65; font-size: 0.95rem;">🧭 Long-Horizon Tasks</span>
+  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">Projects / milestones / subtasks for progress and risk tracking</span>
 </div>
 """, unsafe_allow_html=True)
 
 with st.container(border=True):
     # --- 新建长周期任务 ---
     st.markdown("<div style='height: 0.25rem;'></div>", unsafe_allow_html=True)
-    st.markdown("#### ➕ 新建长周期任务")
+    st.markdown("#### ➕ Create Long-Horizon Task")
     try:
         _lt_all = repo.list_long_tasks(limit=200)
     except Exception as e:
         _lt_all = []
-        st.error(f"加载长周期任务失败：{e}")
+        st.error(f"Failed to load long-horizon tasks: {e}")
 
-    parent_options = [("（无父任务）", None)] + [(f"{t.title} [{t.status} {t.progress}%]", str(t.id)) for t in _lt_all if t.id]
+    parent_options = [("(No parent task)", None)] + [(f"{t.title} [{t.status} {t.progress}%]", str(t.id)) for t in _lt_all if t.id]
     c1, c2, c3, c4 = st.columns([3.2, 1.2, 1.2, 1.4])
     with c1:
-        lt_title = st.text_input("标题", key="lt_new_title", placeholder="例如：长期项目第一阶段交付", label_visibility="collapsed")
-        lt_desc = st.text_area("描述", key="lt_new_desc", placeholder="可选：范围、验收标准、关键风险…", height=70, label_visibility="collapsed")
+        lt_title = st.text_input("Title", key="lt_new_title", placeholder="Example: Phase 1 delivery for the long-term project", label_visibility="collapsed")
+        lt_desc = st.text_area("Description", key="lt_new_desc", placeholder="Optional: scope, acceptance criteria, key risks...", height=70, label_visibility="collapsed")
     with c2:
-        lt_priority = st.selectbox("优先级", ["high", "normal", "low"], index=1, key="lt_new_priority")
-        lt_status = st.selectbox("状态", ["todo", "doing", "blocked", "done", "cancelled"], index=0, key="lt_new_status")
+        lt_priority = st.selectbox("Priority", ["high", "normal", "low"], index=1, key="lt_new_priority")
+        lt_status = st.selectbox("Status", ["todo", "doing", "blocked", "done", "cancelled"], index=0, key="lt_new_status")
     with c3:
-        lt_start = st.date_input("开始日期", value=None, key="lt_new_start")
-        lt_due = st.date_input("截止日期", value=None, key="lt_new_due")
+        lt_start = st.date_input("Start date", value=None, key="lt_new_start")
+        lt_due = st.date_input("Due date", value=None, key="lt_new_due")
     with c4:
         parent_label = st.selectbox(
-            "父任务（可选）",
+            "Parent task (optional)",
             options=[x[0] for x in parent_options],
             index=0,
             key="lt_new_parent",
         )
-        lt_tags = st.text_input("标签", key="lt_new_tags", placeholder="逗号分隔，如：项目,客户,交付")
-        if st.button("创建任务", key="lt_new_create", type="primary", use_container_width=True):
+        lt_tags = st.text_input("Tags", key="lt_new_tags", placeholder="Comma-separated, e.g. project,client,delivery")
+        if st.button("Create Task", key="lt_new_create", type="primary", use_container_width=True):
             title = (lt_title or "").strip()
             if not title:
-                st.warning("请先填写标题。")
+                st.warning("Please enter a title first.")
             else:
                 parent_id = None
                 for lbl, pid in parent_options:
@@ -3152,27 +3234,27 @@ with st.container(border=True):
                         due_date=lt_due.isoformat() if lt_due else None,
                         tags=tags or [],
                     ))
-                    st.session_state.last_feedback = f"已创建长周期任务：{created.title}"
+                    st.session_state.last_feedback = f"Long-horizon task created: {created.title}"
                     st.rerun()
                 except Exception as e:
-                    st.error(f"创建失败：{e}")
+                    st.error(f"Create failed: {e}")
 
     st.markdown("---")
 
     # --- 列表与监督 ---
-    st.markdown("#### 📌 任务列表与监督")
+    st.markdown("#### 📌 Task List & Oversight")
     filter_c1, filter_c2, filter_c3 = st.columns([2, 2, 1.2])
     with filter_c1:
         status_filter = st.multiselect(
-            "状态筛选",
+            "Status filter",
             ["todo", "doing", "blocked", "done", "cancelled"],
             default=["todo", "doing", "blocked"],
             key="lt_filter_status",
         )
     with filter_c2:
-        kw = st.text_input("关键词", key="lt_filter_kw", placeholder="按标题/描述搜索")
+        kw = st.text_input("Keyword", key="lt_filter_kw", placeholder="Search by title or description")
     with filter_c3:
-        show_done = st.checkbox("显示已完成/取消", value=False, key="lt_filter_show_done")
+        show_done = st.checkbox("Show done/cancelled", value=False, key="lt_filter_show_done")
 
     lt_list = _lt_all
     if status_filter:
@@ -3184,7 +3266,7 @@ with st.container(border=True):
         lt_list = [t for t in lt_list if (k in (t.title or "").lower()) or (k in (t.description or "").lower())]
 
     if not lt_list:
-        st.info("暂无符合条件的长周期任务。")
+        st.info("No long-horizon tasks match the current filters.")
     else:
         from datetime import date as _date
         today = _date.today().isoformat()
@@ -3193,51 +3275,51 @@ with st.container(border=True):
             tid = str(t.id or "")
             due_txt = t.due_date or ""
             overdue = bool(due_txt and due_txt < today and t.status not in ("done", "cancelled"))
-            badge = "⚠️ 逾期" if overdue else ("🚧 阻塞" if t.status == "blocked" else "")
+            badge = "⚠️ Overdue" if overdue else ("🚧 Blocked" if t.status == "blocked" else "")
             header = f"{t.title}  ·  {t.status}  ·  {t.progress}%"
             if due_txt:
-                header += f"  ·  截止 {due_txt}"
+                header += f"  ·  Due {due_txt}"
             if badge:
                 header += f"  ·  {badge}"
 
             with st.expander(header, expanded=False):
                 top1, top2, top3, top4 = st.columns([2.2, 1.2, 1.2, 1.2])
                 with top1:
-                    st.caption("描述")
-                    st.write(t.description or "（无）")
-                    st.caption("标签")
-                    st.write(", ".join(t.tags or []) if t.tags else "（无）")
+                    st.caption("Description")
+                    st.write(t.description or "(None)")
+                    st.caption("Tags")
+                    st.write(", ".join(t.tags or []) if t.tags else "(None)")
                     if t.parent_id:
-                        st.caption("父任务")
+                        st.caption("Parent task")
                         st.write(t.parent_id)
                 with top2:
                     new_status = st.selectbox(
-                        "状态",
+                        "Status",
                         ["todo", "doing", "blocked", "done", "cancelled"],
                         index=["todo", "doing", "blocked", "done", "cancelled"].index(t.status),
                         key=f"lt_status_{tid}",
                     )
                     new_priority = st.selectbox(
-                        "优先级",
+                        "Priority",
                         ["high", "normal", "low"],
                         index=["high", "normal", "low"].index(t.priority),
                         key=f"lt_pri_{tid}",
                     )
                 with top3:
-                    new_progress = st.slider("进度", 0, 100, int(t.progress or 0), key=f"lt_prog_{tid}")
-                    new_due = st.date_input("截止日期", value=None if not t.due_date else _date.fromisoformat(t.due_date), key=f"lt_due_{tid}")
+                    new_progress = st.slider("Progress", 0, 100, int(t.progress or 0), key=f"lt_prog_{tid}")
+                    new_due = st.date_input("Due date", value=None if not t.due_date else _date.fromisoformat(t.due_date), key=f"lt_due_{tid}")
                 with top4:
-                    note = st.text_input("更新/备注", key=f"lt_note_{tid}", placeholder="例如：已完成需求评审；阻塞点…")
-                    btn_save = st.button("保存变更", key=f"lt_save_{tid}", use_container_width=True, type="primary")
-                    btn_del = st.button("删除任务", key=f"lt_del_{tid}", use_container_width=True)
+                    note = st.text_input("Update / note", key=f"lt_note_{tid}", placeholder="Example: requirement review completed; current blocker...")
+                    btn_save = st.button("Save Changes", key=f"lt_save_{tid}", use_container_width=True, type="primary")
+                    btn_del = st.button("Delete Task", key=f"lt_del_{tid}", use_container_width=True)
 
                 if btn_del:
                     try:
                         repo.delete_long_task(tid)
-                        st.session_state.last_feedback = f"已删除长周期任务：{t.title}"
+                        st.session_state.last_feedback = f"Long-horizon task deleted: {t.title}"
                         st.rerun()
                     except Exception as e:
-                        st.error(f"删除失败：{e}")
+                        st.error(f"Delete failed: {e}")
 
                 if btn_save:
                     updates = {}
@@ -3255,19 +3337,19 @@ with st.container(border=True):
                         try:
                             repo.update_long_task(tid, updates)
                             if "status" in updates:
-                                repo.add_long_task_log(tid, "status", f"状态变更：{t.status} → {updates['status']}")
+                                repo.add_long_task_log(tid, "status", f"Status changed: {t.status} -> {updates['status']}")
                             if "progress" in updates:
-                                repo.add_long_task_log(tid, "progress", f"进度更新：{t.progress}% → {updates['progress']}%")
+                                repo.add_long_task_log(tid, "progress", f"Progress updated: {t.progress}% -> {updates['progress']}%")
                             if "priority" in updates:
-                                repo.add_long_task_log(tid, "note", f"优先级调整：{t.priority} → {updates['priority']}")
+                                repo.add_long_task_log(tid, "note", f"Priority changed: {t.priority} -> {updates['priority']}")
                         except Exception as e:
-                            st.error(f"保存失败：{e}")
+                            st.error(f"Save failed: {e}")
                     if note and note.strip():
                         try:
                             repo.add_long_task_log(tid, "note", note.strip())
                         except Exception:
                             pass
-                    st.session_state.last_feedback = "长周期任务已更新。"
+                    st.session_state.last_feedback = "Long-horizon task updated."
                     st.rerun()
 
                 # --- 最近日志 ---
@@ -3276,12 +3358,12 @@ with st.container(border=True):
                 except Exception:
                     logs = []
                 if logs:
-                    st.markdown("**最近更新（10条）**")
+                    st.markdown("**Recent updates (latest 10)**")
                     for lg in logs:
                         tm = (lg.created_at or "")[:19].replace("T", " ")
-                        st.markdown(f"- `{tm}` **{lg.kind}**：{lg.content}")
+                        st.markdown(f"- `{tm}` **{lg.kind}**: {_translate_feedback_text(lg.content)}")
                 else:
-                    st.caption("暂无更新日志。")
+                    st.caption("No update logs yet.")
 
 # ---------- 未来日程日历（苹果风格，全宽，放在最后） ----------
 def _escape_html(s: str) -> str:
@@ -3292,28 +3374,28 @@ def _escape_html(s: str) -> str:
 st.markdown("<div style='height: 1.5rem;'></div>", unsafe_allow_html=True)
 st.markdown("""
 <div style="margin-bottom: 0.75rem;">
-  <span style="font-weight: 700; color: #1e293b; font-size: 1.05rem;">📅 日程日历</span>
-  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">可查看本周/本月（含往期）或未来一周/一月</span>
+  <span style="font-weight: 700; color: #1e293b; font-size: 1.05rem;">📅 Schedule Calendar</span>
+  <span style="color:#94a3b8; font-size:0.8rem; margin-left:0.5rem;">View this week / this month or the upcoming week / month</span>
 </div>
 """, unsafe_allow_html=True)
 
 with st.container(border=True):
     today = date.today()
     view_mode = st.radio(
-        "显示范围",
-        ["本周", "未来一周", "本月", "未来一月"],
+        "Range",
+        ["This Week", "Next 7 Days", "This Month", "Next 30 Days"],
         horizontal=True,
         key="future_schedule_view",
         label_visibility="collapsed",
     )
-    if view_mode == "本周":
+    if view_mode == "This Week":
         # 本周一～本周日，含往期
         start_d = today - timedelta(days=today.weekday())
         end_d = start_d + timedelta(days=6)
-    elif view_mode == "未来一周":
+    elif view_mode == "Next 7 Days":
         start_d = today
         end_d = today + timedelta(days=6)
-    elif view_mode == "本月":
+    elif view_mode == "This Month":
         # 本月 1 号～月末，含往期
         start_d = today.replace(day=1)
         _last = (today.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
@@ -3372,7 +3454,7 @@ with st.container(border=True):
     for day_key in tasks_by_day:
         tasks_by_day[day_key].sort(key=lambda x: x.start_time or "")
 
-    weekdays_cn = ["一", "二", "三", "四", "五", "六", "日"]
+    weekdays_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     # 苹果风格 CSS
     st.markdown("""
@@ -3404,9 +3486,9 @@ with st.container(border=True):
 </style>
 """, unsafe_allow_html=True)
 
-    if view_mode in ("本周", "未来一周"):
+    if view_mode in ("This Week", "Next 7 Days"):
         # 一周视图：7 列对应 start_d～start_d+6（本周=周一～周日，未来一周=今天～今天+6）
-        head = "".join([f'<div class="cal-month-head">{w}</div>' for w in ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]])
+        head = "".join([f'<div class="cal-month-head">{w}</div>' for w in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]])
         body_parts = []
         for col in range(7):
             d = start_d + timedelta(days=col)
@@ -3416,15 +3498,15 @@ with st.container(border=True):
             today_cls = " cal-day--today" if is_today else ""
             num_cls = " cal-day-num--today" if is_today else ""
             num_inner = f'<span class="n">{d.day}</span>' if is_today else str(d.day)
-            num_html = f'<div class="cal-day-num{num_cls}">{d.month}月 {num_inner}</div>'
+            num_html = f'<div class="cal-day-num{num_cls}">{d.strftime("%b")} {num_inner}</div>'
             events_html = ""
             for t in day_tasks:
                 time_range = _task_local_time_range(t)
                 pr = (t.priority or "normal").lower()
                 pr_cls = " cal-event--high" if pr == "high" else (" cal-event--low" if pr == "low" else "")
-                title_esc = _escape_html(t.title or "（无标题）")
+                title_esc = _escape_html(t.title or "(Untitled)")
                 events_html += f'<div class="cal-event{pr_cls}"><span class="cal-event-time">{time_range}</span>{title_esc}</div>'
-            empty_label = '<span style="color:#94a3b8;font-size:0.75rem;">无安排</span>'
+            empty_label = '<span style="color:#94a3b8;font-size:0.75rem;">No events</span>'
             body_parts.append(f'<div class="cal-day{today_cls}">{num_html}<div class="cal-day-events">{events_html or empty_label}</div></div>')
         grid_html = f'<div class="cal-apple cal-week"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(body_parts) + "</div>"
         st.markdown(grid_html, unsafe_allow_html=True)
@@ -3438,7 +3520,7 @@ with st.container(border=True):
             week = [cur + timedelta(days=j) for j in range(7)]
             weeks.append(week)
             cur = week[-1] + timedelta(days=1)
-        head = "".join([f'<div class="cal-month-head">周{w}</div>' for w in weekdays_cn])
+        head = "".join([f'<div class="cal-month-head">{w}</div>' for w in weekdays_en])
         cells_html = []
         for week_row in weeks:
             for d in week_row:
@@ -3455,11 +3537,11 @@ with st.container(border=True):
                 for t in day_tasks[:5]:
                     pr = (t.priority or "normal").lower()
                     pr_cls = " cal-month-event--high" if pr == "high" else (" cal-month-event--low" if pr == "low" else "")
-                    title_esc = _escape_html((t.title or "（无）")[:14])
+                    title_esc = _escape_html((t.title or "(None)")[:14])
                     events_html += f'<div class="cal-month-event{pr_cls}">{title_esc}</div>'
                 if len(day_tasks) > 5:
-                    events_html += f'<div style="font-size:0.65rem;color:#94a3b8;">+{len(day_tasks)-5}项</div>'
+                    events_html += f'<div style="font-size:0.65rem;color:#94a3b8;">+{len(day_tasks)-5} more</div>'
                 cells_html.append(f'<div class="cal-month-cell{other_cls}{today_cell_cls}">{num_html}<div class="cal-month-events">{events_html}</div></div>')
         grid_html = f'<div class="cal-apple cal-month"><div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(7,1fr);">{head}</div>' + "".join(cells_html) + "</div>"
         st.markdown(grid_html, unsafe_allow_html=True)
-    st.caption("今日以蓝底圆点标出；事件条左侧颜色表示优先级（红=高，蓝=普通，灰=低）。")
+    st.caption("Today is marked with a blue dot. Event bars use the left accent color for priority: red = high, blue = normal, gray = low.")
