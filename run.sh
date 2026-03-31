@@ -6,13 +6,18 @@ cd "$PROJECT_DIR"
 
 
 # 2. 自动激活虚拟环境
-VENV_PATH="/Users/nujibieke/Documents/codex/ai_schedule/.venv/bin/activate"
+VENV_PATH="./.venv/bin/activate"
 if [ -f "$VENV_PATH" ]; then
     source "$VENV_PATH"
 else
-    echo "❌ 错误: 找不到虚拟环境 $VENV_PATH"
-    exit 1
+    # 尝试备选路径或提示
+    if [ -d ".venv" ]; then
+        source .venv/bin/activate
+    else
+        echo "⚠️ 警告: 找不到默认虚拟环境 .venv，将尝试直接运行..."
+    fi
 fi
+
 
 # 3. 启动 Streamlit
 echo "🚀 正在启动日程规划助手..."
