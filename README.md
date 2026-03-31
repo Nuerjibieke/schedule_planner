@@ -1,6 +1,7 @@
-# AI-Powered Schedule Planner (智能排程助手)
-
 An intelligent scheduling agent driven by LLMs. Users can interact with the agent using natural language (e.g., "Schedule a meeting at 3pm tomorrow") to manage their tasks, resolve scheduling conflicts automatically, and track their productivity.
+
+**Authors**: Nuerjibieke, Zhicheng Hu
+
 
 ## 🚀 Key Features
 
